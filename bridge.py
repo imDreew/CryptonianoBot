@@ -61,7 +61,7 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Testo principale del messaggio
     content = msg.text_html or ""
 
-    # Aggiungi eventuale caption dei media
+    # Se il media ha una caption, aggiungila al testo
     caption = getattr(msg, "caption", None)
     if caption:
         if content:
@@ -87,12 +87,16 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await notify_admin(context, f"Errore nel recupero del media: {e}", msg.message_id)
 
+    # Costruisci payload per Discord
     payload = {"content": content}
-    
+    files = None
+
     try:
         if file_url:
-            # invio come link in Discord, con testo sopra
-            response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+            # scarica il file e invialo come file su Discord
+            file_data = requests.get(file_url)
+            files = {"file": file_data.content}
+            response = requests.post(DISCORD_WEBHOOK_URL, data={"content": content}, files=files)
         else:
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
 
@@ -101,6 +105,7 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Errore nell'inoltro a Discord: {e}")
         await notify_admin(context, f"Errore nell'inoltro: {e}", msg.message_id)
+
 
 
 
