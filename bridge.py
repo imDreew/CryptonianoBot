@@ -32,30 +32,42 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     content = msg.text_html or ""
+    payload = {"content": content}
+    files = None
     embed = None
 
-    # Gestione media
-    if msg.photo:
-        file_id = msg.photo[-1].file_id
-        file = await context.bot.get_file(file_id)
-        embed = {"image": {"url": file.file_path}}
-    elif msg.video:
-        file_id = msg.video.file_id
-        file = await context.bot.get_file(file_id)
-        embed = {"video": {"url": file.file_path}}
-    elif msg.document:
-        file_id = msg.document.file_id
-        file = await context.bot.get_file(file_id)
-        embed = {"url": file.file_path}  # per i documenti resta solo link cliccabile
-
-    payload = {"content": content}
-    if embed:
-        payload["embeds"] = [embed]
-
     try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        # FOTO -> con embed URL
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
+            file = await context.bot.get_file(file_id)
+            embed = {"image": {"url": file.file_path}}
+
+        # VIDEO -> come allegato diretto per avere player
+        elif msg.video:
+            file_id = msg.video.file_id
+            file = await context.bot.get_file(file_id)
+            video_data = requests.get(file.file_path)
+            files = {"file": ("video.mp4", video_data.content)}
+
+        # DOCUMENTI -> solo link
+        elif msg.document:
+            file_id = msg.document.file_id
+            file = await context.bot.get_file(file_id)
+            content += f"\n📎 {file.file_path}"
+
+        if embed:
+            payload["embeds"] = [embed]
+
+        # Invio su Discord
+        if files:
+            response = requests.post(DISCORD_WEBHOOK_URL, data=payload, files=files)
+        else:
+            response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+
         response.raise_for_status()
         logging.info(f"Inoltrato a Discord: {content[:50]}...")
+
     except Exception as e:
         logging.error(f"Errore nell'inoltro a Discord: {e}")
 
