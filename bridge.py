@@ -27,13 +27,32 @@ logging.basicConfig(
 )
 
 # ====== FUNZIONE NOTIFICA ADMIN ======
-async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int, chat_id: int = TELEGRAM_SOURCE_CHAT_ID):
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int):
+    """
+    Invia notifica all'admin in caso di errore nell'inoltro di messaggi.
+    Il messaggio contiene il link diretto al messaggio Telegram.
+    """
+    if not TELEGRAM_ADMIN_CHAT_ID:
+        logging.error("⚠️ TELEGRAM_ADMIN_CHAT_ID non configurato!")
+        return
+
+    # Costruisci link cliccabile al messaggio nel canale privato
+    # Rimuoviamo il prefisso -100 dal chat_id
+    channel_link_id = str(TELEGRAM_SOURCE_CHAT_ID)[4:] if str(TELEGRAM_SOURCE_CHAT_ID).startswith("-100") else str(TELEGRAM_SOURCE_CHAT_ID)
+    message_link = f"https://t.me/c/{channel_link_id}/{message_id}"
+
+    alert_text = (
+        "‼️ERRORE INOLTRO‼️\n"
+        f"CAUSA: {cause}\n"
+        f"LINK : {message_link}"
+    )
+
     try:
-        msg_link = f"https://t.me/c/{str(chat_id)[4:]}/{message_id}" if str(chat_id).startswith("-100") else f"https://t.me/{chat_id}/{message_id}"
-        alert = f"‼️ERRORE INOLTRO‼️\nCAUSA: {cause}\nMESSAGGIO: [Apri messaggio]({msg_link})"
-        await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=alert, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=alert_text)
+        logging.info("Notifica inviata all'admin")
     except Exception as e:
         logging.error(f"Impossibile notificare l'admin: {e}")
+
 
 # ====== HANDLER TELEGRAM ======
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
