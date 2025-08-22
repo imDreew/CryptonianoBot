@@ -61,43 +61,39 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Testo principale del messaggio
     content = msg.text_html or ""
 
-    # Se il media ha una caption, aggiungila al testo
-    caption = getattr(msg, "caption", None)
-    if caption:
-        if content:
-            content += "\n\n" + caption
-        else:
-            content = caption
-
     # Gestione media
     file_url = None
+    media_type = None
     try:
         if msg.photo:
             file_id = msg.photo[-1].file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
+            media_type = "image"
         elif msg.video:
             file_id = msg.video.file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
+            media_type = "video"
         elif msg.document:
             file_id = msg.document.file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
+            media_type = "document"
     except Exception as e:
         await notify_admin(context, f"Errore nel recupero del media: {e}", msg.message_id)
 
-    # Costruisci payload per Discord
-    payload = {"content": content}
-    files = None
-
+    # Inoltra su Discord
     try:
-        if file_url:
-            # scarica il file e invialo come file su Discord
-            file_data = requests.get(file_url)
-            files = {"file": file_data.content}
-            response = requests.post(DISCORD_WEBHOOK_URL, data={"content": content}, files=files)
+        if file_url and media_type in ["image", "video"]:
+            # Per immagini e video usiamo embeds di Discord con anteprima
+            embed = {"description": content, "image": {"url": file_url} if media_type=="image" else None,
+                     "video": {"url": file_url} if media_type=="video" else None}
+            payload = {"embeds": [embed]}
+            response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
         else:
+            # Testo semplice o documenti
+            payload = {"content": content}
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
 
         response.raise_for_status()
