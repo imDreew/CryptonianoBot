@@ -64,35 +64,44 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Gestione media
     file_url = None
     media_type = None
+    caption = None
+
     try:
         if msg.photo:
             file_id = msg.photo[-1].file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
             media_type = "image"
+            caption = msg.caption_html or ""
         elif msg.video:
             file_id = msg.video.file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
             media_type = "video"
+            caption = msg.caption_html or ""
         elif msg.document:
             file_id = msg.document.file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
             media_type = "document"
+            caption = msg.caption_html or ""
     except Exception as e:
         await notify_admin(context, f"Errore nel recupero del media: {e}", msg.message_id)
 
-    # Inoltra su Discord
+    # Costruisci il contenuto da inviare su Discord
     try:
         if file_url and media_type in ["image", "video"]:
-            # Per immagini e video usiamo embeds di Discord con anteprima
-            embed = {"description": content, "image": {"url": file_url} if media_type=="image" else None,
-                     "video": {"url": file_url} if media_type=="video" else None}
+            # Usa la caption se presente, altrimenti il testo normale
+            embed_text = caption or content
+            embed = {
+                "description": embed_text,
+                "image": {"url": file_url} if media_type == "image" else None,
+                "video": {"url": file_url} if media_type == "video" else None
+            }
             payload = {"embeds": [embed]}
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
         else:
-            # Testo semplice o documenti
+            # Solo testo o documenti
             payload = {"content": content}
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
 
@@ -101,6 +110,7 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Errore nell'inoltro a Discord: {e}")
         await notify_admin(context, f"Errore nell'inoltro: {e}", msg.message_id)
+
 
 
 
