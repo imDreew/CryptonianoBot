@@ -31,48 +31,60 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
         return
 
-    content = msg.text_html or ""
-    payload = {"content": content}
-    files = None
-    embeds = []
+    content = msg.caption_html or msg.text_html or ""
+
+    files = []
 
     try:
-        # ===== FOTO (singola o multipla) =====
+        # ===== FOTO (anche multiple in album) =====
         if msg.photo:
-            # Singola foto
             file_id = msg.photo[-1].file_id
             file = await context.bot.get_file(file_id)
-            embeds.append({"image": {"url": file.file_path}})
-
-        elif msg.media_group_id and msg.photo:
-            # Album di foto (media group) - gestiamo più foto
-            for p in msg.photo:
-                file_id = p.file_id
-                file = await context.bot.get_file(file_id)
-                embeds.append({"image": {"url": file.file_path}})
+            photo_data = requests.get(file.file_path)
+            files.append(("file", ("photo.jpg", photo_data.content)))
 
         # ===== VIDEO =====
-        elif msg.video:
+        if msg.video:
             file_id = msg.video.file_id
             file = await context.bot.get_file(file_id)
             video_data = requests.get(file.file_path)
-            files = {"file": ("video.mp4", video_data.content)}
+            files.append(("file", ("video.mp4", video_data.content)))
 
         # ===== DOCUMENTI =====
-        elif msg.document:
+        if msg.document:
             file_id = msg.document.file_id
             file = await context.bot.get_file(file_id)
-            content += f"\n📎 {file.file_path}"
-            payload["content"] = content
+            doc_data = requests.get(file.file_path)
+            filename = msg.document.file_name or "document"
+            files.append(("file", (filename, doc_data.content)))
 
-        if embeds:
-            payload["embeds"] = embeds
+        # ===== GESTIONE ALBUM (MediaGroup) =====
+        if msg.media_group_id:
+            # recupera tutti i messaggi dello stesso gruppo
+            group_messages = [
+                m for m in context.bot_data.get(msg.media_group_id, []) if m != msg
+            ]
+            # aggiungi quello attuale
+            group_messages.append(msg)
+            # scarica tutti i file del gruppo
+            files = []
+            for m in group_messages:
+                if m.photo:
+                    file_id = m.photo[-1].file_id
+                    file = await context.bot.get_file(file_id)
+                    photo_data = requests.get(file.file_path)
+                    files.append(("file", ("photo.jpg", photo_data.content)))
+                elif m.video:
+                    file_id = m.video.file_id
+                    file = await context.bot.get_file(file_id)
+                    video_data = requests.get(file.file_path)
+                    files.append(("file", ("video.mp4", video_data.content)))
 
-        # Invio su Discord
+        # ===== INVIO SU DISCORD =====
         if files:
-            response = requests.post(DISCORD_WEBHOOK_URL, data=payload, files=files)
+            response = requests.post(DISCORD_WEBHOOK_URL, data={"content": content}, files=files)
         else:
-            response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+            response = requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
 
         response.raise_for_status()
         logging.info(f"Inoltrato a Discord: {content[:50]}...")
