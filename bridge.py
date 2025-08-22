@@ -87,33 +87,33 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = msg.caption_html or ""
     except Exception as e:
         await notify_admin(context, f"Errore nel recupero del media: {e}", msg.message_id)
+        return
 
     # Costruisci il contenuto da inviare su Discord
     try:
         if file_url and media_type == "image":
-        # Immagine → embed con anteprima
+            # Immagine → embed con anteprima
             embed_text = caption or content
             embed = {"description": embed_text, "image": {"url": file_url}}
             payload = {"embeds": [embed]}
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
-    
+
         elif file_url and media_type == "video":
             # Video → prima embed con caption
             if caption or content:
                 embed = {"description": caption or content}
                 requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
-    
-        # Poi invia il video come allegato
-        video_data = requests.get(file_url).content
-        files = {"file": ("video.mp4", video_data)}
-        requests.post(DISCORD_WEBHOOK_URL, files=files)
+
+            # Poi invia il video come allegato
+            video_data = requests.get(file_url).content
+            files = {"file": ("video.mp4", video_data)}
+            requests.post(DISCORD_WEBHOOK_URL, files=files)
 
         else:
             # Solo testo o documenti
             payload = {"content": content}
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
 
-        response.raise_for_status()
         logging.info(f"Inoltrato a Discord: {content[:50]}...")
     except Exception as e:
         logging.error(f"Errore nell'inoltro a Discord: {e}")
