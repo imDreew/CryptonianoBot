@@ -4,10 +4,19 @@ import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
+print("=== VARIABILI CARICATE ===")
+print("TELEGRAM_BOT_TOKEN:", TELEGRAM_BOT_TOKEN)
+print("DISCORD_WEBHOOK_URL:", DISCORD_WEBHOOK_URL)
+print("TELEGRAM_SOURCE_CHAT_ID:", TELEGRAM_SOURCE_CHAT_ID)
+print("===========================")
+
+
 # ====== CONFIG DA VARIABILI D'AMBIENTE ======
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 TELEGRAM_SOURCE_CHAT_ID = os.getenv("TELEGRAM_SOURCE_CHAT_ID")
+
+
 
 if not TELEGRAM_BOT_TOKEN or not DISCORD_WEBHOOK_URL or not TELEGRAM_SOURCE_CHAT_ID:
     print("❌ ERRORE: manca una variabile di ambiente!")
@@ -17,6 +26,7 @@ if not TELEGRAM_BOT_TOKEN or not DISCORD_WEBHOOK_URL or not TELEGRAM_SOURCE_CHAT
     sys.exit(1)
 
 TELEGRAM_SOURCE_CHAT_ID = int(TELEGRAM_SOURCE_CHAT_ID)
+
 
 # ====== LOGGING ======
 logging.basicConfig(
