@@ -58,51 +58,40 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
         return
 
+    # Testo principale del messaggio
     content = msg.text_html or ""
+
+    # Aggiungi eventuale caption dei media
+    caption = getattr(msg, "caption", None)
+    if caption:
+        if content:
+            content += "\n\n" + caption
+        else:
+            content = caption
 
     # Gestione media
     file_url = None
-    if msg.photo:
-        file_id = msg.photo[-1].file_id
-        try:
+    try:
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
-        except Exception as e:
-            await notify_admin(
-                context,
-                f"Errore nel recupero della foto: {e}",
-                msg.message_id
-            )
-    elif msg.video:
-        file_id = msg.video.file_id
-        try:
+        elif msg.video:
+            file_id = msg.video.file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
-        except Exception as e:
-            await notify_admin(
-                context,
-                f"Errore nel recupero del video: {e}",
-                msg.message_id
-            )
-    elif msg.document:
-        file_id = msg.document.file_id
-        try:
+        elif msg.document:
+            file_id = msg.document.file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
-        except Exception as e:
-            await notify_admin(
-                context,
-                f"Errore nel recupero del documento: {e}",
-                msg.message_id
-            )
+    except Exception as e:
+        await notify_admin(context, f"Errore nel recupero del media: {e}", msg.message_id)
 
     payload = {"content": content}
-    files = None
-
+    
     try:
         if file_url:
-            # Invia come link in Discord, non come file upload
-            payload["content"] += f"\n{file_url}"
+            # invio come link in Discord, con testo sopra
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
         else:
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
@@ -112,6 +101,7 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Errore nell'inoltro a Discord: {e}")
         await notify_admin(context, f"Errore nell'inoltro: {e}", msg.message_id)
+
 
 
 async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int):
