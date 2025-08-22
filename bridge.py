@@ -2,7 +2,7 @@ import os
 import sys
 import logging
 import requests
-from telegram import Update
+from telegram import Update, Message
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 # ====== VARIABILI D'AMBIENTE ======
@@ -24,7 +24,7 @@ logging.basicConfig(
 
 # ====== HANDLER TELEGRAM ======
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message or update.channel_post
+    msg: Message = update.message or update.channel_post
     if not msg:
         return
 
@@ -34,30 +34,39 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = msg.text_html or ""
     payload = {"content": content}
     files = None
-    embed = None
+    embeds = []
 
     try:
-        # FOTO -> con embed URL
+        # ===== FOTO (singola o multipla) =====
         if msg.photo:
+            # Singola foto
             file_id = msg.photo[-1].file_id
             file = await context.bot.get_file(file_id)
-            embed = {"image": {"url": file.file_path}}
+            embeds.append({"image": {"url": file.file_path}})
 
-        # VIDEO -> come allegato diretto per avere player
+        elif msg.media_group_id and msg.photo:
+            # Album di foto (media group) - gestiamo più foto
+            for p in msg.photo:
+                file_id = p.file_id
+                file = await context.bot.get_file(file_id)
+                embeds.append({"image": {"url": file.file_path}})
+
+        # ===== VIDEO =====
         elif msg.video:
             file_id = msg.video.file_id
             file = await context.bot.get_file(file_id)
             video_data = requests.get(file.file_path)
             files = {"file": ("video.mp4", video_data.content)}
 
-        # DOCUMENTI -> solo link
+        # ===== DOCUMENTI =====
         elif msg.document:
             file_id = msg.document.file_id
             file = await context.bot.get_file(file_id)
             content += f"\n📎 {file.file_path}"
+            payload["content"] = content
 
-        if embed:
-            payload["embeds"] = [embed]
+        if embeds:
+            payload["embeds"] = embeds
 
         # Invio su Discord
         if files:
