@@ -9,7 +9,9 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 TELEGRAM_SOURCE_CHAT_ID = os.getenv("TELEGRAM_SOURCE_CHAT_ID")
-TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")  # chat privata admin
+TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")
+
+MAX_FILE_SIZE = 8 * 1024 * 1024  # 8 MB limite Discord
 
 if not TELEGRAM_BOT_TOKEN or not DISCORD_WEBHOOK_URL or not TELEGRAM_SOURCE_CHAT_ID or not TELEGRAM_ADMIN_CHAT_ID:
     print("❌ ERRORE: manca una variabile di ambiente!")
@@ -24,71 +26,65 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# ====== COSTANTI ======
-MAX_FILE_SIZE = 8 * 1024 * 1024  # 8MB limite Discord
-
-# ====== FUNZIONE DI NOTIFICA ADMIN ======
-async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int):
-    link = f"https://t.me/c/{str(TELEGRAM_SOURCE_CHAT_ID)[4:]}/{message_id}"  # link messaggio privato canale
-    text = f"‼️ERRORE INOLTRO‼️\nCAUSA: {cause}\nMESSAGGIO: [Apri su Telegram]({link})"
+# ====== FUNZIONE NOTIFICA ADMIN ======
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int, chat_id: int = TELEGRAM_SOURCE_CHAT_ID):
     try:
-        await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=text, parse_mode="Markdown")
-        logging.info("Notifica admin inviata")
+        msg_link = f"https://t.me/c/{str(chat_id)[4:]}/{message_id}" if str(chat_id).startswith("-100") else f"https://t.me/{chat_id}/{message_id}"
+        alert = f"‼️ERRORE INOLTRO‼️\nCAUSA: {cause}\nMESSAGGIO: [Apri messaggio]({msg_link})"
+        await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=alert, parse_mode="Markdown")
     except Exception as e:
         logging.error(f"Impossibile notificare l'admin: {e}")
 
 # ====== HANDLER TELEGRAM ======
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.channel_post
-    if not msg:
-        return
-    if msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
+    if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
         return
 
     content = msg.text_html or ""
-    file_too_big = False
     media_urls = []
 
-    # Gestione media
+    # ====== FOTO ======
     if msg.photo:
-        for photo in msg.photo:
-            if photo.file_size and photo.file_size > MAX_FILE_SIZE:
-                file_too_big = True
-                break
-            file = await context.bot.get_file(photo.file_id)
-            media_urls.append(file.file_path)
+        file = await context.bot.get_file(msg.photo[-1].file_id)  # solo versione più grande
+        if file.file_size > MAX_FILE_SIZE:
+            await notify_admin(context, "File troppo grande", msg.message_id)
+            return
+        media_urls.append(file.file_path)
+
+    # ====== VIDEO ======
     elif msg.video:
-        if msg.video.file_size and msg.video.file_size > MAX_FILE_SIZE:
-            file_too_big = True
-        else:
-            file = await context.bot.get_file(msg.video.file_id)
-            media_urls.append(file.file_path)
+        file = await context.bot.get_file(msg.video.file_id)
+        if file.file_size > MAX_FILE_SIZE:
+            await notify_admin(context, "File troppo grande", msg.message_id)
+            return
+        media_urls.append(file.file_path)
+
+    # ====== DOCUMENTO ======
     elif msg.document:
-        if msg.document.file_size and msg.document.file_size > MAX_FILE_SIZE:
-            file_too_big = True
-        else:
-            file = await context.bot.get_file(msg.document.file_id)
-            media_urls.append(file.file_path)
+        file = await context.bot.get_file(msg.document.file_id)
+        if file.file_size > MAX_FILE_SIZE:
+            await notify_admin(context, "File troppo grande", msg.message_id)
+            return
+        media_urls.append(file.file_path)
 
-    if file_too_big:
-        await notify_admin(context, cause="File troppo grande", message_id=msg.message_id)
-        return
-
-    # Inoltro a Discord
+    # ====== COSTRUZIONE EMBED DISCORD ======
     try:
         if media_urls:
-            embeds = [{"description": content, "image": {"url": url}} if i == 0 else {"image": {"url": url}}
-                      for i, url in enumerate(media_urls)]
-            payload = {"embeds": embeds}
-            response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+            embeds = []
+            for i, url in enumerate(media_urls):
+                if i == 0:
+                    embeds.append({"description": content, "image": {"url": url}})
+                else:
+                    embeds.append({"image": {"url": url}})
+            response = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": embeds})
         else:
-            payload = {"content": content}
-            response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+            response = requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
         response.raise_for_status()
         logging.info(f"Inoltrato a Discord: {content[:50]}...")
     except Exception as e:
         logging.error(f"Errore nell'inoltro a Discord: {e}")
-        await notify_admin(context, cause=str(e), message_id=msg.message_id)
+        await notify_admin(context, str(e), msg.message_id)
 
 # ====== MAIN ======
 def main():
