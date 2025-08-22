@@ -32,27 +32,25 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     content = msg.text_html or ""
+    embed = None
 
-    # Gestione media (inviare link per avere anteprima)
-    media_url = None
+    # Gestione media
     if msg.photo:
         file_id = msg.photo[-1].file_id
         file = await context.bot.get_file(file_id)
-        media_url = file.file_path
+        embed = {"image": {"url": file.file_path}}
     elif msg.video:
         file_id = msg.video.file_id
         file = await context.bot.get_file(file_id)
-        media_url = file.file_path
+        embed = {"video": {"url": file.file_path}}
     elif msg.document:
         file_id = msg.document.file_id
         file = await context.bot.get_file(file_id)
-        media_url = file.file_path
-
-    # Se c'è media, aggiungi il link nel messaggio
-    if media_url:
-        content = f"{content}\n{media_url}" if content else media_url
+        embed = {"url": file.file_path}  # per i documenti resta solo link cliccabile
 
     payload = {"content": content}
+    if embed:
+        payload["embeds"] = [embed]
 
     try:
         response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
