@@ -134,13 +134,15 @@ async def polling_updates(app):
 
 # ====== MAIN ======
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(start_polling_task).build()
     app.add_handler(MessageHandler(filters.ALL, forward_message))
     logging.info("✅ Bridge avviato e in ascolto...")
-
-    # Avvia polling per eventuali sync
-    asyncio.create_task(polling_updates(app))
     app.run_polling()
+
+async def start_polling_task(app):
+    # Questo viene eseguito nel loop già avviato da Telegram
+    asyncio.create_task(polling_updates(app))
+
 
 if __name__ == "__main__":
     main()
