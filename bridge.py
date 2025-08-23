@@ -8,8 +8,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
-    EditedMessageHandler,
-    DeletedMessageHandler
 )
 
 # ====== VARIABILI D'AMBIENTE ======
@@ -38,7 +36,6 @@ logging.basicConfig(
 
 # ====== FUNZIONE NOTIFICA ADMIN ======
 async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int):
-    """Notifica l'admin su Telegram con link cliccabile al messaggio originale."""
     if not TELEGRAM_ADMIN_CHAT_ID:
         logging.warning("⚠️ TELEGRAM_ADMIN_CHAT_ID non impostato, impossibile notificare admin")
         return
@@ -57,9 +54,8 @@ async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_i
     except Exception as e:
         logging.error(f"Impossibile notificare l'admin: {e}")
 
-# ====== FUNZIONE PRINCIPALE DI INOLTRO ======
+# ====== FUNZIONI UTILI ======
 def resolve_webhook(content: str) -> str:
-    """Trova il webhook giusto in base all'hashtag iniziale."""
     if not content:
         return None
     for tag, webhook in WEBHOOK_MAP.items():
@@ -67,6 +63,7 @@ def resolve_webhook(content: str) -> str:
             return webhook
     return None
 
+# ====== HANDLER PRINCIPALE (nuovo messaggio) ======
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.channel_post
     if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
@@ -93,7 +90,6 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await notify_admin(context, f"Errore nel recupero media: {e}", msg.message_id)
         return
 
-    # scegli webhook in base al tag
     webhook_url = resolve_webhook(content or caption)
     if not webhook_url:
         logging.warning("Nessun webhook corrispondente trovato, messaggio ignorato.")
@@ -122,7 +118,7 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Errore inoltro a Discord: {e}")
         await notify_admin(context, f"Errore inoltro: {e}", msg.message_id)
 
-# ====== SYNC EDIT ======
+# ====== HANDLER EDIT ======
 async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.edited_message
     if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
@@ -136,9 +132,8 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     embed = {"description": f"✏️ Messaggio modificato:\n\n{content}"}
     requests.post(webhook_url, json={"embeds": [embed]})
 
-# ====== SYNC DELETE ======
+# ====== HANDLER DELETE ======
 async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Non riceviamo il testo cancellato da Telegram, quindi avvisa solo
     for webhook in WEBHOOK_MAP.values():
         if webhook:
             embed = {"description": "❌ Un messaggio è stato eliminato su Telegram."}
@@ -147,9 +142,15 @@ async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ====== MAIN ======
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # nuovo messaggio
     app.add_handler(MessageHandler(filters.ALL, forward_message))
-    app.add_handler(EditedMessageHandler(handle_edit))
-    app.add_handler(DeletedMessageHandler(handle_delete))
+
+    # modifiche (usa filter edited)
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
+
+    # cancellazioni (usa filter deleted)
+    app.add_handler(MessageHandler(filters.UpdateType.DELETED_MESSAGE, handle_delete))
 
     logging.info("✅ Bridge avviato e in ascolto...")
     app.run_polling()
