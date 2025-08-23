@@ -110,11 +110,16 @@ async def sync_deletions(app):
         await asyncio.sleep(15)  # controlla ogni 15s
 
 
-# ====== MAIN ======
-app.add_handler(MessageHandler(filters.ALL, forward_message))
-asyncio.create_task(sync_deletions(app))
-await app.run_polling()
+async def main():
+    app = Application.builder().token("YOUR_TELEGRAM_BOT_TOKEN").build()
+
+    app.add_handler(MessageHandler(filters.ALL, forward_message))
+
+    # Avvia la task di sync deletions in background
+    asyncio.create_task(sync_deletions(app))
+
+    # Avvia il polling
+    await app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
