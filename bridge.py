@@ -2,24 +2,20 @@ import os
 import sys
 import logging
 import requests
+import asyncio
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 # ====== VARIABILI D'AMBIENTE ======
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_SOURCE_CHAT_ID = os.getenv("TELEGRAM_SOURCE_CHAT_ID")
-TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")  # dove ricevere notifiche
+TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")  # opzionale
 
 # Mappatura hashtag → webhook Discord
-WEBHOOK_MAP = {
-    "#ANALISI": os.getenv("DISCORD_WEBHOOK_ANALISI"),
-    "#COPY_TRADING": os.getenv("DISCORD_WEBHOOK_COPY"),
-    "#DISCUSSIONE": os.getenv("DISCORD_WEBHOOK_DISCUSSIONE"),
+DISCORD_WEBHOOKS = {
+    "#ANALISI": os.getenv("DISCORD_ANALISI_WEBHOOK"),
+    "#COPY_TRADING": os.getenv("DISCORD_COPY_WEBHOOK"),
+    "#DISCUSSIONE": os.getenv("DISCORD_DISCUSSIONE_WEBHOOK"),
 }
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_SOURCE_CHAT_ID:
@@ -34,126 +30,98 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# ====== FUNZIONE NOTIFICA ADMIN ======
+# Cache locale per sync cancellazioni
+# telegram_msg_id → {"discord_id": int, "webhook": str}
+MSG_MAP = {}
+
+
+# ====== NOTIFICA ADMIN ======
 async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int):
     if not TELEGRAM_ADMIN_CHAT_ID:
-        logging.warning("⚠️ TELEGRAM_ADMIN_CHAT_ID non impostato, impossibile notificare admin")
         return
-
-    chat_id_abs = str(abs(TELEGRAM_SOURCE_CHAT_ID))
-    message_link = f"https://t.me/c/{chat_id_abs[4:]}/{message_id}"
-
-    alert_text = f"‼️ERRORE INOLTRO‼️\nCAUSA: {cause}\nLINK: {message_link}"
-
+    link = f"https://t.me/c/{str(TELEGRAM_SOURCE_CHAT_ID)[4:]}/{message_id}"
     try:
         await context.bot.send_message(
-            chat_id=int(TELEGRAM_ADMIN_CHAT_ID),
-            text=alert_text,
-            parse_mode="HTML"
+            chat_id=TELEGRAM_ADMIN_CHAT_ID,
+            text=f"‼️ERRORE‼️\nCausa: {cause}\nMessaggio: {link}"
         )
     except Exception as e:
-        logging.error(f"Impossibile notificare l'admin: {e}")
+        logging.error(f"Notifica admin fallita: {e}")
 
-# ====== FUNZIONI UTILI ======
-def resolve_webhook(content: str) -> str:
-    if not content:
-        return None
-    for tag, webhook in WEBHOOK_MAP.items():
-        if webhook and content.strip().startswith(tag):
-            return webhook
-    return None
 
-# ====== HANDLER PRINCIPALE (nuovo messaggio) ======
+# ====== INOLTRO MESSAGGI ======
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.channel_post
     if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
         return
 
-    content = msg.text_html or ""
-    caption = msg.caption_html or ""
+    text = msg.text or msg.caption or ""
+    target_webhook = None
 
-    file_url, media_type = None, None
-    try:
-        if msg.photo:
-            file_id = msg.photo[-1].file_id
-            file = await context.bot.get_file(file_id)
-            file_url, media_type = file.file_path, "image"
-        elif msg.video:
-            file_id = msg.video.file_id
-            file = await context.bot.get_file(file_id)
-            file_url, media_type = file.file_path, "video"
-        elif msg.document:
-            file_id = msg.document.file_id
-            file = await context.bot.get_file(file_id)
-            file_url, media_type = file.file_path, "document"
-    except Exception as e:
-        await notify_admin(context, f"Errore nel recupero media: {e}", msg.message_id)
-        return
+    for hashtag, webhook in DISCORD_WEBHOOKS.items():
+        if text.startswith(hashtag) and webhook:
+            target_webhook = webhook
+            break
 
-    webhook_url = resolve_webhook(content or caption)
-    if not webhook_url:
-        logging.warning("Nessun webhook corrispondente trovato, messaggio ignorato.")
+    if not target_webhook:
+        logging.info("Nessun hashtag valido, messaggio ignorato")
         return
 
     try:
-        if file_url and media_type == "image":
-            embed_text = caption or content
-            embed = {"description": embed_text, "image": {"url": file_url}}
-            requests.post(webhook_url, json={"embeds": [embed]})
-
-        elif file_url and media_type == "video":
-            if caption or content:
-                embed = {"description": caption or content}
-                requests.post(webhook_url, json={"embeds": [embed]})
-            video_data = requests.get(file_url).content
-            files = {"file": ("video.mp4", video_data)}
-            requests.post(webhook_url, files=files)
-
+        payload = {"content": text}
+        response = requests.post(target_webhook, json=payload)
+        if response.status_code == 200 or response.status_code == 204:
+            discord_msg = response.json() if response.text else {}
+            if "id" in discord_msg:
+                MSG_MAP[msg.message_id] = {
+                    "discord_id": discord_msg["id"],
+                    "webhook": target_webhook
+                }
+            logging.info(f"Inoltrato a Discord: {text[:50]}")
         else:
-            payload = {"content": content}
-            requests.post(webhook_url, json=payload)
-
-        logging.info(f"Inoltrato a Discord: {content[:50]}...")
+            raise Exception(f"Errore HTTP {response.status_code}")
     except Exception as e:
-        logging.error(f"Errore inoltro a Discord: {e}")
-        await notify_admin(context, f"Errore inoltro: {e}", msg.message_id)
+        logging.error(f"Errore inoltro: {e}")
+        await notify_admin(context, str(e), msg.message_id)
 
-# ====== HANDLER EDIT ======
-async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.edited_message
-    if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
-        return
 
-    content = msg.text_html or msg.caption_html or ""
-    webhook_url = resolve_webhook(content)
-    if not webhook_url:
-        return
+# ====== POLLING CANCELLAZIONI ======
+async def sync_deletions(app):
+    """Controlla periodicamente se messaggi Telegram sono stati cancellati."""
+    bot = app.bot
+    while True:
+        try:
+            history = await bot.get_chat_history(chat_id=TELEGRAM_SOURCE_CHAT_ID, limit=100)
+            alive_ids = {m.message_id for m in history}
 
-    embed = {"description": f"✏️ Messaggio modificato:\n\n{content}"}
-    requests.post(webhook_url, json={"embeds": [embed]})
+            for tg_id in list(MSG_MAP.keys()):
+                if tg_id not in alive_ids:  # messaggio sparito → delete anche su Discord
+                    data = MSG_MAP.pop(tg_id)
+                    try:
+                        del_url = f"{data['webhook']}/messages/{data['discord_id']}"
+                        r = requests.delete(del_url)
+                        logging.info(f"Cancellato messaggio Telegram {tg_id} anche su Discord ({r.status_code})")
+                    except Exception as e:
+                        logging.error(f"Errore cancellazione Discord: {e}")
 
-# ====== HANDLER DELETE ======
-async def handle_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for webhook in WEBHOOK_MAP.values():
-        if webhook:
-            embed = {"description": "❌ Un messaggio è stato eliminato su Telegram."}
-            requests.post(webhook, json={"embeds": [embed]})
+        except Exception as e:
+            logging.error(f"Errore polling cancellazioni: {e}")
+
+        await asyncio.sleep(15)  # controlla ogni 15s
+
 
 # ====== MAIN ======
-def main():
+async def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # nuovo messaggio
     app.add_handler(MessageHandler(filters.ALL, forward_message))
 
-    # modifiche (usa filter edited)
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
+    # avvia il task parallelo per sync cancellazioni
+    asyncio.create_task(sync_deletions(app))
 
-    # cancellazioni (usa filter deleted)
-    app.add_handler(MessageHandler(filters.UpdateType.DELETED_MESSAGE, handle_delete))
+    logging.info("✅ Bridge avviato...")
+    await app.run_polling()
 
-    logging.info("✅ Bridge avviato e in ascolto...")
-    app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
