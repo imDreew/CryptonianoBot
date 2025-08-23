@@ -111,16 +111,9 @@ async def sync_deletions(app):
 
 
 # ====== MAIN ======
-async def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL, forward_message))
-
-    # avvia il task parallelo per sync cancellazioni
-    asyncio.create_task(sync_deletions(app))
-
-    logging.info("✅ Bridge avviato...")
-    await app.run_polling()
-
+app.add_handler(MessageHandler(filters.ALL, forward_message))
+asyncio.create_task(sync_deletions(app))
+await app.run_polling()
 
 if __name__ == "__main__":
     import asyncio
