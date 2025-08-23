@@ -1,2 +1,1 @@
 worker: python bridge.py
-
