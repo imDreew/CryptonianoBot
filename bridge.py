@@ -4,7 +4,7 @@ import logging
 import requests
 import asyncio
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, filters
 
 # ====== VARIABILI D'AMBIENTE ======
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
