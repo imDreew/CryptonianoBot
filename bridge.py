@@ -1,176 +1,149 @@
 import os
-import asyncio
+import sys
 import logging
-import json
 import requests
-from telegram import Update, Message
+from telegram import Update
 from telegram.ext import (
-    Application,
-    MessageHandler,
-    filters,
-    ContextTypes,
+    ApplicationBuilder, MessageHandler, filters, ContextTypes
 )
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ====== VARIABILI D'AMBIENTE ======
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+DISCORD_WEBHOOKS = os.getenv("DISCORD_WEBHOOKS")  # JSON string: {"ANALISI": "...", "COPY_TRADING": "..."}
+TELEGRAM_SOURCE_CHAT_ID = os.getenv("TELEGRAM_SOURCE_CHAT_ID")
+TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")  # dove ricevere notifiche
 
-# 🔑 Config
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+if not TELEGRAM_BOT_TOKEN or not DISCORD_WEBHOOKS or not TELEGRAM_SOURCE_CHAT_ID:
+    print("❌ ERRORE: manca una variabile di ambiente!")
+    sys.exit(1)
 
-# 📌 Mapping hashtag → webhook Discord
-HASHTAG_TO_WEBHOOK = {
-    "#ANALISI": os.getenv("DISCORD_WEBHOOK_ANALISI"),
-    "#COPY_TRADING": os.getenv("DISCORD_WEBHOOK_COPY"),
-    "#DISCUSSIONE": os.getenv("DISCORD_WEBHOOK_DISCUSSIONE"),
-}
+TELEGRAM_SOURCE_CHAT_ID = int(TELEGRAM_SOURCE_CHAT_ID)
+import json
+DISCORD_WEBHOOKS = json.loads(DISCORD_WEBHOOKS)
 
-# File per tracciare messaggi
-MAPPING_FILE = "messages.json"
+# ====== LOGGING ======
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
-# Carica mapping
-if os.path.exists(MAPPING_FILE):
-    with open(MAPPING_FILE, "r") as f:
-        MSG_MAP = json.load(f)
-else:
-    MSG_MAP = {}  # {telegram_id: {"discord_id": str, "webhook": str}}
-
-
-def save_mapping():
-    with open(MAPPING_FILE, "w") as f:
-        json.dump(MSG_MAP, f)
-
-
-# 📩 Notifica admin per errori ricorrenti
+# ====== FUNZIONE NOTIFICA ADMIN ======
 async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int):
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=f"⚠️ Errore {cause} sul messaggio {message_id}"
-        )
-    except Exception as e:
-        logger.error(f"Errore nell'invio notifica admin: {e}")
-
-
-# 📤 Inoltro messaggio a Discord
-def forward_to_discord(telegram_id: int, content: str = None, file_url: str = None, media_type: str = None):
-    webhook_url = None
-    discord_message_id = None
-
-    # Decidi canale in base all’hashtag
-    if content:
-        first_word = content.strip().split()[0]
-        webhook_url = HASHTAG_TO_WEBHOOK.get(first_word.upper())
-
-    if not webhook_url:
-        logger.warning(f"Nessun webhook trovato per messaggio: {content}")
+    """Notifica l'admin su Telegram con link cliccabile al messaggio originale."""
+    if not TELEGRAM_ADMIN_CHAT_ID:
+        logging.warning("⚠️ TELEGRAM_ADMIN_CHAT_ID non impostato, impossibile notificare admin")
         return
 
+    # Genera link al messaggio nel canale privato
+    chat_id_abs = str(abs(TELEGRAM_SOURCE_CHAT_ID))
+    message_link = f"https://t.me/c/{chat_id_abs[4:]}/{message_id}"
+
+    alert_text = f"‼️ERRORE INOLTRO‼️\nCAUSA: {cause}\nLINK MESSAGGIO: {message_link}"
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(TELEGRAM_ADMIN_CHAT_ID),
+            text=alert_text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Impossibile notificare l'admin: {e}")
+
+
+# ====== HELPER ======
+def get_discord_webhook(message_text: str):
+    """Restituisce il webhook corretto in base all'hashtag iniziale."""
+    words = message_text.strip().split()
+    if not words:
+        return None
+    hashtag = words[0].upper()
+    return DISCORD_WEBHOOKS.get(hashtag)
+
+
+# ====== HANDLER TELEGRAM ======
+async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message or update.channel_post
+    if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
+        return
+
+    # Testo principale del messaggio
+    content = msg.text_html or ""
+    webhook_url = get_discord_webhook(content)
+    if not webhook_url:
+        logging.info("Messaggio senza hashtag valido, ignorato")
+        return
+
+    # Gestione media
+    file_url = None
+    media_type = None
+    caption = None
+
+    try:
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
+            file = await context.bot.get_file(file_id)
+            file_url = file.file_path
+            media_type = "image"
+            caption = msg.caption_html or ""
+        elif msg.video:
+            file_id = msg.video.file_id
+            file = await context.bot.get_file(file_id)
+            file_url = file.file_path
+            media_type = "video"
+            caption = msg.caption_html or ""
+        elif msg.document:
+            file_id = msg.document.file_id
+            file = await context.bot.get_file(file_id)
+            file_url = file.file_path
+            media_type = "document"
+            caption = msg.caption_html or ""
+    except Exception as e:
+        await notify_admin(context, f"Errore nel recupero del media: {e}", msg.message_id)
+        return
+
+    # Costruisci il contenuto da inviare su Discord
     try:
         if file_url and media_type == "image":
-            embed = {"description": content, "image": {"url": file_url}}
+            embed_text = caption or content
+            embed = {"description": embed_text, "image": {"url": file_url}}
             payload = {"embeds": [embed]}
-            r = requests.post(webhook_url, json=payload)
-            discord_message_id = r.json().get("id")
+            requests.post(webhook_url, json=payload)
 
         elif file_url and media_type == "video":
-            # Prima la caption
-            if content:
-                r = requests.post(webhook_url, json={"embeds": [{"description": content}]})
-                discord_message_id = r.json().get("id")
-
-            # Poi il file come allegato
+            if caption or content:
+                embed = {"description": caption or content}
+                requests.post(webhook_url, json={"embeds": [embed]})
             video_data = requests.get(file_url).content
             files = {"file": ("video.mp4", video_data)}
             requests.post(webhook_url, files=files)
 
         else:
-            # Solo testo
             payload = {"content": content}
-            r = requests.post(webhook_url, json=payload)
-            discord_message_id = r.json().get("id")
+            requests.post(webhook_url, json=payload)
 
-        # Salva mapping
-        if discord_message_id:
-            MSG_MAP[str(telegram_id)] = {"discord_id": discord_message_id, "webhook": webhook_url}
-            save_mapping()
-
+        logging.info(f"Inoltrato a Discord: {content[:50]}...")
     except Exception as e:
-        logger.error(f"Errore nell'inoltro a Discord: {e}")
+        logging.error(f"Errore nell'inoltro a Discord: {e}")
+        await notify_admin(context, f"Errore nell'inoltro: {e}", msg.message_id)
 
 
-# 📌 Handler nuovi messaggi
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message: Message = update.effective_message
-    content = message.text or message.caption or ""
-
-    # Controlla se ci sono media
-    file_url = None
-    media_type = None
-
-    if message.photo:
-        photo = message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        file_url = file.file_path
-        media_type = "image"
-
-    elif message.video:
-        file = await context.bot.get_file(message.video.file_id)
-        file_url = file.file_path
-        media_type = "video"
-
-    # Inoltra a Discord
-    forward_to_discord(message.message_id, content, file_url, media_type)
-
-
-# 📌 Handler modifiche messaggi
-async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message: Message = update.edited_message
-    if not message:
-        return
-    content = f"✏️ Messaggio modificato:\n{message.text or message.caption}"
-    forward_to_discord(message.message_id, content)
-
-
-# 🔄 Controlla cancellazioni
+# ====== JOB QUEUE E CHECK MESSAGGI CANCELLATI ======
 async def check_deleted_messages(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = ADMIN_CHAT_ID  # gruppo monitorato
-    for telegram_id, data in list(MSG_MAP.items()):
-        try:
-            msg = await context.bot.forward_message(
-                chat_id=ADMIN_CHAT_ID,  # inoltro “di test”
-                from_chat_id=chat_id,
-                message_id=int(telegram_id)
-            )
-            # se arriva qui → messaggio esiste ancora → eliminiamo l’inoltro temporaneo
-            await msg.delete()
-        except Exception:
-            # messaggio eliminato su Telegram → cancella anche su Discord
-            webhook = data["webhook"]
-            discord_id = data["discord_id"]
-            url = webhook.replace("webhooks", "webhooks") + f"/messages/{discord_id}"
-            requests.delete(url)
-            del MSG_MAP[telegram_id]
-            save_mapping()
-            logger.info(f"❌ Messaggio {telegram_id} eliminato anche su Discord")
+    # Qui puoi implementare polling delle cancellazioni
+    pass
 
 
-# 🚀 Avvio bot
-async def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+# ====== MAIN ======
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.ALL, forward_message))
 
-    # Nuovi messaggi
-    app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, handle_message))
-
-    # Modifiche messaggi
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
-
-    # Job per controllare cancellazioni ogni 30s
+    # JobQueue (poll messaggi cancellati ogni 30s)
     app.job_queue.run_repeating(check_deleted_messages, interval=30)
 
-    logger.info("✅ Bridge avviato e in ascolto...")
-    await app.run_polling(poll_interval=10)
+    logging.info("✅ Bridge avviato e in ascolto...")
+    app.run_polling(poll_interval=10)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
