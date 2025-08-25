@@ -3,16 +3,13 @@ import sys
 import logging
 import json
 import requests
-import nest_asyncio
 import asyncio
 from telegram import Update, Message
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-nest_asyncio.apply()  # Permette di riusare l'event loop già in esecuzione su Railway
-
 # ====== CONFIG ======
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-DISCORD_WEBHOOKS_JSON = os.getenv("DISCORD_WEBHOOKS")  # JSON string: {"#ANALISI": "...", "#COPY_TRADING": "..."}
+DISCORD_WEBHOOKS_JSON = os.getenv("DISCORD_WEBHOOKS")  # {"#ANALISI": "...", "#COPY_TRADING": "..."}
 TELEGRAM_SOURCE_CHAT_ID = int(os.getenv("TELEGRAM_SOURCE_CHAT_ID", 0))
 TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")
 
@@ -34,37 +31,27 @@ else:
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ====== HELPER ======
+# ====== HELPERS ======
 def save_mapping():
     with open(MAPPING_FILE, "w") as f:
         json.dump(MSG_MAP, f)
 
 def telegram_html_to_discord(html_text: str) -> str:
-    """Convert Telegram HTML formatting to Discord Markdown."""
     if not html_text:
         return ""
     text = html_text
-    # Bold
     text = text.replace("<b>", "**").replace("</b>", "**")
-    # Italic
     text = text.replace("<i>", "*").replace("</i>", "*")
-    # Underline
     text = text.replace("<u>", "__").replace("</u>", "__")
-    # Strikethrough
     text = text.replace("<s>", "~~").replace("</s>", "~~")
-    # Inline code
     text = text.replace("<code>", "`").replace("</code>", "`")
-    # Code block
     text = text.replace("<pre>", "```").replace("</pre>", "```")
-    # Links
     import re
     text = re.sub(r'<a href="([^"]+)">([^<]+)</a>', r'[\2](\1)', text)
-    # Remove remaining HTML tags
     text = re.sub(r"<[^>]+>", "", text)
     return text
 
 def get_discord_webhook(message_text: str):
-    """Restituisce il webhook corretto in base all'hashtag iniziale."""
     words = message_text.strip().split()
     if not words:
         return None
@@ -72,23 +59,20 @@ def get_discord_webhook(message_text: str):
     return DISCORD_WEBHOOKS.get(hashtag)
 
 async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int):
-    """Invia notifica all'admin in caso di errore."""
     if not TELEGRAM_ADMIN_CHAT_ID:
-        logger.warning("⚠️ TELEGRAM_ADMIN_CHAT_ID non impostato, impossibile notificare admin")
+        logger.warning("⚠️ TELEGRAM_ADMIN_CHAT_ID non impostato")
         return
-    message_link = f"https://t.me/c/{str(abs(TELEGRAM_SOURCE_CHAT_ID))[4:]}/{message_id}"
-    alert_text = f"‼️ERRORE INOLTRO‼️\nCAUSA: {cause}\nLINK: {message_link}"
+    link = f"https://t.me/c/{str(abs(TELEGRAM_SOURCE_CHAT_ID))[4:]}/{message_id}"
     try:
-        await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=alert_text)
+        await context.bot.send_message(chat_id=TELEGRAM_ADMIN_CHAT_ID, text=f"‼️Errore‼️ {cause}\nLink: {link}")
     except Exception as e:
-        logger.error(f"Errore nell'invio notifica admin: {e}")
+        logger.error(f"Errore notifica admin: {e}")
 
-# ====== FORWARD MESSAGE ======
+# ====== FORWARD ======
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.channel_post
     if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
         return
-
     content_html = msg.text_html or msg.caption_html or ""
     content = telegram_html_to_discord(content_html)
     webhook_url = get_discord_webhook(content)
@@ -96,25 +80,21 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Messaggio senza hashtag valido: {content}")
         return
 
-    # Gestione media
     file_url = None
     media_type = None
     caption = content
 
     try:
         if msg.photo:
-            file_id = msg.photo[-1].file_id
-            file = await context.bot.get_file(file_id)
+            file = await context.bot.get_file(msg.photo[-1].file_id)
             file_url = file.file_path
             media_type = "image"
         elif msg.video:
-            file_id = msg.video.file_id
-            file = await context.bot.get_file(file_id)
+            file = await context.bot.get_file(msg.video.file_id)
             file_url = file.file_path
             media_type = "video"
         elif msg.document:
-            file_id = msg.document.file_id
-            file = await context.bot.get_file(file_id)
+            file = await context.bot.get_file(msg.document.file_id)
             file_url = file.file_path
             media_type = "document"
     except Exception as e:
@@ -128,17 +108,13 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r = requests.post(webhook_url, json=payload)
             discord_message_id = r.json().get("id")
         elif file_url and media_type == "video":
-            # Embed caption
             if content:
                 r = requests.post(webhook_url, json={"embeds": [{"description": caption}]})
                 discord_message_id = r.json().get("id")
-            # File
             video_data = requests.get(file_url).content
-            files = {"file": ("video.mp4", video_data)}
-            requests.post(webhook_url, files=files)
+            requests.post(webhook_url, files={"file": ("video.mp4", video_data)})
         else:
-            payload = {"content": content}
-            r = requests.post(webhook_url, json=payload)
+            r = requests.post(webhook_url, json={"content": content})
             discord_message_id = r.json().get("id")
 
         if discord_message_id:
@@ -146,42 +122,29 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_mapping()
 
         logger.info(f"Inoltrato a Discord: {content[:50]}...")
-
     except Exception as e:
-        logger.error(f"Errore nell'inoltro a Discord: {e}")
-        await notify_admin(context, f"Errore inoltro: {e}", msg.message_id)
+        logger.error(f"Errore inoltro Discord: {e}")
+        await notify_admin(context, f"Inoltro Discord: {e}", msg.message_id)
 
-# ====== HANDLE EDITS ======
-async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.edited_message
-    if not msg:
-        return
-    content_html = msg.text_html or msg.caption_html or ""
-    content = telegram_html_to_discord(content_html)
-    await forward_message(update, context)
-
-# ====== POLLING MESSAGGI CANCELLATI ======
+# ====== CHECK CANCELLAZIONI ======
 async def check_deleted_messages(context: ContextTypes.DEFAULT_TYPE):
     for telegram_id, data in list(MSG_MAP.items()):
-        webhook = data["webhook"]
-        discord_id = data["discord_id"]
-        url = f"{webhook}/messages/{discord_id}"
         try:
-            requests.delete(url)
+            requests.delete(f"{data['webhook']}/messages/{data['discord_id']}")
             del MSG_MAP[telegram_id]
         except Exception as e:
-            logger.warning(f"Non è stato possibile cancellare il messaggio Discord {discord_id}: {e}")
+            logger.warning(f"Errore cancellazione Discord {data['discord_id']}: {e}")
     save_mapping()
 
 # ====== MAIN ======
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, forward_message))
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
     app.job_queue.run_repeating(check_deleted_messages, interval=30)
-    logger.info("✅ Bridge avviato e in ascolto...")
+    logger.info("✅ Bridge avviato...")
     await app.run_polling(poll_interval=10)
 
 # ====== ENTRY POINT ======
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
