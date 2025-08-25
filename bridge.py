@@ -86,8 +86,7 @@ async def main():
     app = Application.builder().token("YOUR_TELEGRAM_BOT_TOKEN").build()
 
     # Ascolta i messaggi di testo/caption
-    app.add_handler(MessageHandler(filters.TEXT | filters.Caption.ALL, forward_message))
-
+    app.add_handler(MessageHandler(filters.TEXT | filters.Caption, forward_message))
     # Avvia il bot
     await app.run_polling()
 
