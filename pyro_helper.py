@@ -1,121 +1,163 @@
-# pyro_helper.py
+# bridge.py
 import os
-import asyncio
-import tempfile
+import re
+import json
 import logging
-from pathlib import Path
-from typing import Optional
-
 import requests
-from pyrogram import Client
-from pyrogram.errors import RPCError
+import asyncio
 
+from telegram import Update
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
+
+import pyro_helper  # <--- modulo helper che scarica i file grossi via Pyrogram
+
+# logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-API_ID = int(os.getenv("TG_API_ID", "0"))
-API_HASH = os.getenv("TG_API_HASH", "")
-SESSION_STRING = os.getenv("PYRO_SESSION", None)  # preferibile: string session per headless deploy
-SESSION_NAME = os.getenv("PYRO_SESSION_NAME", "pyro_session")
+# env vars
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+SOURCE_CHAT_ID = int(os.getenv("TELEGRAM_SOURCE_CHAT_ID", "0"))
+ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 
-_client: Optional[Client] = None
+# mapping webhook Discord
+DISCORD_WEBHOOKS = {}
+try:
+    DISCORD_WEBHOOKS = json.loads(os.getenv("DISCORD_WEBHOOKS", "{}"))
+except Exception:
+    logger.warning("Variabile DISCORD_WEBHOOKS non è un JSON valido.")
 
-def _make_client() -> Client:
-    global _client
-    if SESSION_STRING:
-        # crea client usando session string (headless)
-        _client = Client(
-            name="pyro-client",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            session_string=SESSION_STRING,
-            workdir="."
-        )
-    else:
-        _client = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, workdir=".")
-    return _client
 
-async def init_client():
-    """Avvia il client Pyrogram (chiamare una volta all'avvio del bridge)."""
-    global _client
-    if _client is None:
-        _make_client()
-        try:
-            await _client.start()
-            logger.info("✅ Pyrogram client avviato.")
-        except Exception as e:
-            logger.exception("Impossibile avviare Pyrogram client: %s", e)
-            raise
+# --- utils --- #
+def telegram_html_to_discord(text: str) -> str:
+    """Conversione minimale da HTML Telegram a testo Discord."""
+    if not text:
+        return ""
+    text = re.sub(r"<b>(.*?)</b>", r"**\1**", text, flags=re.DOTALL)
+    text = re.sub(r"<i>(.*?)</i>", r"*\1*", text, flags=re.DOTALL)
+    text = re.sub(r"<u>(.*?)</u>", r"__\1__", text, flags=re.DOTALL)
+    text = re.sub(r"<a href=['\"](.*?)['\"]>(.*?)</a>", r"[\2](\1)", text)
+    text = re.sub(r"<.*?>", "", text)
+    return text
 
-async def stop_client():
-    global _client
-    if _client is not None:
-        try:
-            await _client.stop()
-            logger.info("Pyrogram client fermato.")
-        except Exception as e:
-            logger.exception("Errore nello stop di Pyrogram: %s", e)
 
-async def download_and_forward(chat_id: int, message_id: int, webhook_url: str, caption: str = "", media_type: str = None):
-    """
-    Scarica il media dal messaggio Telegram (usando Pyrogram) e lo invia a Discord tramite webhook_url.
-    Restituisce il JSON della risposta Discord se va a buon fine.
-    """
-    if _client is None:
-        await init_client()
+def get_discord_webhook(content: str) -> str | None:
+    """Determina il webhook Discord in base agli hashtag nel messaggio."""
+    if not content:
+        return None
+    hashtags = re.findall(r"#(\w+)", content)
+    for tag in hashtags:
+        if tag.lower() in DISCORD_WEBHOOKS:
+            return DISCORD_WEBHOOKS[tag.lower()]
+    return None
 
-    # download
-    file_path = None
+
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, text: str, message_id: int = None):
+    """Manda una notifica all'admin se configurato."""
+    if not ADMIN_CHAT_ID:
+        return
     try:
-        msg = await _client.get_messages(chat_id, message_id)
-        if not msg:
-            raise RuntimeError("Messaggio non trovato via Pyrogram")
-
-        # scarica il media in una cartella temporanea
-        tmpdir = tempfile.mkdtemp(prefix="pyro_dl_")
-        # file_name None -> lascia Pyrogram scegliere nome
-        file_path = await _client.download_media(msg, file_name=str(Path(tmpdir) / "media"))
-        if not file_path:
-            raise RuntimeError("Nessun file scaricato dal messaggio")
-
-        logger.info("File scaricato via Pyrogram: %s", file_path)
-
-        # 1) invia prima la caption come embed (se video e/o se vuoi che il testo sia in alto)
-        if caption:
-            embed_payload = {"embeds": [{"description": caption}]}
-            # requests è sincrono: esegui in thread per non bloccare event loop
-            await asyncio.to_thread(requests.post, webhook_url, json=embed_payload)
-
-        # 2) invia il file come attachment (così Discord mostra il player per i video)
-        def _post_file():
-            with open(file_path, "rb") as f:
-                files = {"file": (Path(file_path).name, f)}
-                r = requests.post(webhook_url, files=files)
-                r.raise_for_status()
-                try:
-                    return r.json()
-                except Exception:
-                    return {"status_code": r.status_code}
-
-        discord_resp = await asyncio.to_thread(_post_file)
-        logger.info("File inviato a Discord via webhook (resp): %s", discord_resp)
-        return discord_resp
-
-    except RPCError as e:
-        logger.exception("Errore RPC Pyrogram: %s", e)
-        raise
+        if message_id:
+            await context.bot.send_message(ADMIN_CHAT_ID, f"{text}\n(rif. messaggio {message_id})")
+        else:
+            await context.bot.send_message(ADMIN_CHAT_ID, text)
     except Exception as e:
-        logger.exception("Errore download_and_forward: %s", e)
-        raise
-    finally:
-        # cleanup
+        logger.error("Errore notify_admin: %s", e)
+
+
+# --- core --- #
+async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg:
+        return
+
+    try:
+        # recupero content (html -> testo Discord)
+        content_html = msg.text_html or msg.caption_html or ""
+        content = telegram_html_to_discord(content_html)
+
+        # webhook per forwarding
+        webhook_url = get_discord_webhook(content)
+        if not webhook_url:
+            return
+
+        media_type = None
+        file_url = None
+        caption = msg.caption_html or ""
+
         try:
-            if file_path and Path(file_path).exists():
-                Path(file_path).unlink()
-            # rimuovi tmp dir se vuota
-            if 'tmpdir' in locals() and Path(tmpdir).exists():
+            if msg.photo:
+                file_id = msg.photo[-1].file_id
+                file = await context.bot.get_file(file_id)
+                file_url = file.file_path
+                media_type = "image"
+            elif msg.video:
+                file_id = msg.video.file_id
+                file = await context.bot.get_file(file_id)
+                file_url = file.file_path
+                media_type = "video"
+            elif msg.document:
+                file_id = msg.document.file_id
+                file = await context.bot.get_file(file_id)
+                file_url = file.file_path
+                media_type = "document"
+            else:
+                # solo testo → embed su Discord
+                requests.post(webhook_url, json={"embeds": [{"description": content}]})
+                return
+
+        except Exception as e:
+            err_text = str(e)
+            # fallback se il file è troppo grande per Bot API
+            if "File is too big" in err_text or "file is too big" in err_text.lower():
                 try:
-                    Path(tmpdir).rmdir()
-                except OSError:
-                    pass
-        except Exception:
-            pass
+                    await pyro_helper.download_and_forward(
+                        chat_id=msg.chat_id,
+                        message_id=msg.message_id,
+                        webhook_url=webhook_url,
+                        caption=content,
+                        media_type=media_type,
+                    )
+                except Exception as e2:
+                    await notify_admin(context, f"Errore Pyrogram helper: {e2}", msg.message_id)
+                return
+            else:
+                await notify_admin(context, f"Errore nel recupero media: {e}", msg.message_id)
+                return
+
+        # se il file è piccolo, invio normale
+        if caption:
+            requests.post(webhook_url, json={"embeds": [{"description": telegram_html_to_discord(caption)}]})
+        if file_url:
+            file_bytes = await context.bot.download_file(file.file_path)
+            files = {"file": (os.path.basename(file.file_path), file_bytes)}
+            requests.post(webhook_url, files=files)
+
+    except Exception as e:
+        logger.error("Errore in forward_message: %s", e)
+        await notify_admin(context, f"Errore generico in forward_message: {e}", msg.message_id)
+
+
+# --- main --- #
+async def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.Chat(SOURCE_CHAT_ID), forward_message))
+
+    # init client Pyrogram
+    await pyro_helper.init_client()
+
+    try:
+        await app.run_polling(poll_interval=10)
+    finally:
+        await pyro_helper.stop_client()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
