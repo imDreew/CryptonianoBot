@@ -207,11 +207,13 @@ async def main():
     app.job_queue.run_repeating(check_deleted_messages, interval=30)
 
     logger.info("✅ Bridge avviato e in ascolto...")
-    await app.run_polling(poll_interval=10)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await asyncio.Event().wait()  # Mantiene il processo vivo
 
 if __name__ == "__main__":
-    import nest_asyncio
-    nest_asyncio.apply()  # Permette di riusare il loop già in esecuzione
-
     import asyncio
+
+    # Avvia il bot direttamente senza chiudere manualmente l'event loop
     asyncio.get_event_loop().run_until_complete(main())
