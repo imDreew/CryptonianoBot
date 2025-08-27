@@ -102,18 +102,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Errore inoltro testo: {e}")
 
-# === MAIN ===
 async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(MessageHandler(filters.ALL, handle_message))
-    logger.info("✅ Bridge avviato e in ascolto...")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    await asyncio.Event().wait()  # Mantiene il processo vivo
+
+    # Imposta il webhook invece del polling
+    PORT = int(os.getenv("PORT", 8080))
+    WEBHOOK_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}/{BOT_TOKEN}"
+
+    logger.info(f"✅ Impostazione webhook su {WEBHOOK_URL}")
+
+    await app.bot.set_webhook(WEBHOOK_URL)
+
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+        webhook_url=WEBHOOK_URL,
+    )
+
 
 if __name__ == "__main__":
-    import asyncio
-
-    # Avvia il bot direttamente senza chiudere manualmente l'event loop
-    asyncio.get_event_loop().run_until_complete(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("🛑 Bridge interrotto manualmente.")
