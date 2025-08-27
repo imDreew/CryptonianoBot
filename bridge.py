@@ -34,51 +34,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TELEGRAM_SOURCE_CHAT_ID = os.getenv("TELEGRAM_SOURCE_CHAT_ID")
 TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")
 
-# Webhook mapping: JSON {"#ANALISI": "...", "#COPY_TRADING": "...", ...}
-DISCORD_WEBHOOKS_RAW = os.getenv("DISCORD_WEBHOOKS", "{}")
+# Webhook mapping: lettura diretta da variabili d’ambiente (Railway)
+DISCORD_WEBHOOKS = {}
+for env_name, env_val in os.environ.items():
+    if env_name.startswith("DISCORD_WEBHOOK_") and env_val:
+        tag = "#" + env_name.replace("DISCORD_WEBHOOK_", "").upper()
+        DISCORD_WEBHOOKS[tag] = env_val
 
-# Webhook exposure (Railway)
-PORT = int(os.getenv("PORT", "8080"))
-PUBLIC_BASE = os.getenv("WEBHOOK_BASE_URL") or (
-    f"https://{os.getenv('RAILWAY_STATIC_URL')}" if os.getenv("RAILWAY_STATIC_URL") else None
-)
-
-# Pyrogram helper (opzionale, per media > 20MB)
-PYROGRAM_API_ID = os.getenv("PYROGRAM_API_ID")
-PYROGRAM_API_HASH = os.getenv("PYROGRAM_API_HASH")
-PYROGRAM_SESSION = os.getenv("PYROGRAM_SESSION")
-TG_LOCAL_URL = os.getenv("TG_LOCAL_URL")  # es. http://127.0.0.1:8081
-
-# Soglia Bot API (circa 20MB)
-BOT_API_LIMIT = 20 * 1024 * 1024
-
-# =========================
-# Validazioni minime
-# =========================
-missing = []
-if not BOT_TOKEN:
-    missing.append("BOT_TOKEN")
-if not TELEGRAM_SOURCE_CHAT_ID:
-    missing.append("TELEGRAM_SOURCE_CHAT_ID")
-if not DISCORD_WEBHOOKS_RAW or DISCORD_WEBHOOKS_RAW.strip() == "{}":
-    missing.append("DISCORD_WEBHOOKS")
-
-if missing:
-    logger.error(f"❌ ERRORE: Manca/mancano variabili d'ambiente: {', '.join(missing)}")
-    # Non solleviamo SystemExit su Railway per vedere i log
-    raise RuntimeError("Env mancanti")
-
-try:
-    TELEGRAM_SOURCE_CHAT_ID = int(TELEGRAM_SOURCE_CHAT_ID)
-except Exception:
-    raise RuntimeError("TELEGRAM_SOURCE_CHAT_ID deve essere un intero (es. -1001234567890)")
-
-try:
-    DISCORD_WEBHOOKS = json.loads(DISCORD_WEBHOOKS_RAW)
-    # Normalizziamo le chiavi in maiuscolo
-    DISCORD_WEBHOOKS = {k.upper(): v for k, v in DISCORD_WEBHOOKS.items()}
-except Exception as e:
-    raise RuntimeError(f"DISCORD_WEBHOOKS non è un JSON valido: {e}")
 
 # =========================
 # Utilità
