@@ -3,13 +3,10 @@ import re
 import logging
 import requests
 import asyncio
-import nest_asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 from pyro_helper_sync import download_media
-
-nest_asyncio.apply()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
