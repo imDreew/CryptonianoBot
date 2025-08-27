@@ -104,7 +104,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.ALL, handle_message))
-    await app.run_polling(poll_interval=10)
+    logger.info("✅ Bridge avviato e in ascolto...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await asyncio.Event().wait()  # Mantiene il processo vivo
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import asyncio
+
+    # Avvia il bot direttamente senza chiudere manualmente l'event loop
+    asyncio.get_event_loop().run_until_complete(main())
