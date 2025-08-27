@@ -11,6 +11,11 @@ from pyro_helper_sync import download_media
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+logging.basicConfig(level=logging.DEBUG)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"📩 Nuovo messaggio da Telegram: {update.message}")
+
 # === CONFIG ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOKS = {}  # hashtag -> webhook URL
