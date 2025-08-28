@@ -167,9 +167,9 @@ def send_discord_file(webhook_url: str, file_bytes: bytes, filename: str, conten
 
 
 # =========================
-# Pyrogram fallback
+# Pyrogram fallback (async)
 # =========================
-def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
+async def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
     """
     Usa Pyrogram (session string) per scaricare media >20MB.
     Restituisce path locale del file, o None su errore.
@@ -177,12 +177,12 @@ def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
     if not (TG_API_ID and TG_API_HASH and TG_SESSION):
         return None
     try:
-        from pyro_helper_sync import download_media_via_pyro
+        from pyro_helper_sync import download_media_via_pyro_async
     except Exception as e:
-        logger.exception("Impossibile importare pyro_helper_sync: %s", e)
+        logger.exception("Impossibile importare helper Pyrogram: %s", e)
         return None
     try:
-        path = download_media_via_pyro(
+        path = await download_media_via_pyro_async(
             api_id=TG_API_ID,
             api_hash=TG_API_HASH,
             session_string=TG_SESSION,
@@ -308,9 +308,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify_admin(context, "Errore download <20MB via Bot API")
         return
 
-    # >=20MB o size ignota → Pyrogram
+    # >=20MB o size ignota → Pyrogram (async)
     try:
-        path = pyro_download_by_ids(msg.chat_id, msg.message_id)
+        path = await pyro_download_by_ids(msg.chat_id, msg.message_id)
         if not path:
             await notify_admin(context, "Download via Pyrogram fallito o non configurato.")
             return
@@ -372,3 +372,4 @@ if __name__ == "__main__":
         app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
     else:
         run_webhook(app)
+
