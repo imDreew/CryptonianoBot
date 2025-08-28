@@ -201,14 +201,11 @@ async def pyro_download_by_ids(
 
     invite_link = None
     if chat_id not in PYRO_KNOWN_CHATS:
-        logger.info("Pyrogram: canale %s non in cache, provo a generare autoinvite.", chat_id)
+        logger.info("Pyrogram: canale %s non in cache, genero autoinvite via Bot API…", chat_id)
         invite_link = await _get_autoinvite_for_pyro(context, chat_id)
-        if invite_link:
-            logger.debug("Pyrogram: autoinvite generato: %s", invite_link)
-        else:
-            logger.info("Pyrogram: nessun autoinvite disponibile, tenterò accesso diretto.")
+        logger.info("Pyrogram: invite_link=%s", invite_link or "None")
 
-    logger.info("Pyrogram: avvio download per (chat_id=%s, message_id=%s)", chat_id, message_id)
+    logger.info("Pyrogram: avvio download (chat_id=%s, message_id=%s)", chat_id, message_id)
     try:
         path = await download_media_via_pyro_async(
             api_id=TG_API_ID,
@@ -217,7 +214,7 @@ async def pyro_download_by_ids(
             chat_id=chat_id,
             message_id=message_id,
             download_dir=tempfile.gettempdir(),
-            invite_link=invite_link,
+            invite_link=invite_link,  # <-- PASSIAMO L'INVITE SE DISPONIBILE
         )
         PYRO_KNOWN_CHATS.add(chat_id)
         logger.info("Pyrogram: download completato. Path: %s", path)
@@ -455,3 +452,4 @@ if __name__ == "__main__":
         app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
     else:
         run_webhook(app)
+
