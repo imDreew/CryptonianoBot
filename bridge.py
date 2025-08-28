@@ -1,386 +1,289 @@
 import os
-import re
-import html
+import io
+import time
 import json
 import logging
-import asyncio
-from typing import Optional, Tuple
+import tempfile
+from typing import Optional, Dict, Any
 
 import requests
 from requests import Response
 
-from telegram import Update, Message
-from telegram.constants import ParseMode
+from telegram import Update, Message, MessageEntity
 from telegram.ext import (
-    Application,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    Application, ApplicationBuilder, ContextTypes,
+    MessageHandler, filters, CallbackQueryHandler, CommandHandler
 )
 
-# =========================
-# Logging
-# =========================
+# === Logging ================================================================
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bridge")
 
-# === CONFIG ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 8080))
+# === Env / Config ==========================================================
+def env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name, str(default)).strip().lower()
+    return v in ("1", "true", "yes", "on")
 
-# Railway fornisce già questa variabile
-RAILWAY_STATIC_URL = os.getenv("RAILWAY_STATIC_URL")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN mancante.")
 
-# Se PUBLIC_BASE è impostato la usiamo, altrimenti fallback a RAILWAY_STATIC_URL
-PUBLIC_BASE = os.getenv("PUBLIC_BASE", RAILWAY_STATIC_URL)
+TELEGRAM_SOURCE_CHAT_ID = int(os.getenv("TELEGRAM_SOURCE_CHAT_ID", "0"))
+TELEGRAM_ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 
-# =========================
-# Env
-# =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-TELEGRAM_SOURCE_CHAT_ID = os.getenv("TELEGRAM_SOURCE_CHAT_ID")
-TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")
+FORWARD_EDITS = env_bool("FORWARD_EDITS", False)
+INCLUDE_AUTHOR = env_bool("INCLUDE_AUTHOR", False)
 
-# Webhook mapping: lettura diretta da variabili d’ambiente (Railway)
-DISCORD_WEBHOOKS = {}
-for env_name, env_val in os.environ.items():
-    if env_name.startswith("DISCORD_WEBHOOK_") and env_val:
-        tag = "#" + env_name.replace("DISCORD_WEBHOOK_", "").upper()
-        DISCORD_WEBHOOKS[tag] = env_val
+# Webhooks Discord per categorie/hashtag
+DISCORD_WEBHOOK_SCALPING   = os.getenv("DISCORD_WEBHOOK_SCALPING", "").strip()
+DISCORD_WEBHOOK_ALGORITMO  = os.getenv("DISCORD_WEBHOOK_ALGORITMO", "").strip()
+DISCORD_WEBHOOK_FORMAZIONE = os.getenv("DISCORD_WEBHOOK_FORMAZIONE", "").strip()
+DISCORD_WEBHOOK_DEFAULT    = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip()  # opzionale
 
+WEBHOOK_MAP = {
+    "SCALPING": DISCORD_WEBHOOK_SCALPING,
+    "ALGORITMO": DISCORD_WEBHOOK_ALGORITMO,
+    "FORMAZIONE": DISCORD_WEBHOOK_FORMAZIONE,
+}
 
-# =========================
-# Utilità
-# =========================
-def first_hashtag_upper(text: str) -> Optional[str]:
+# Telegram file size limit per download diretto via getFile + HTTP
+BOT_API_LIMIT = 20 * 1024 * 1024  # 20MB
+
+# Pyrogram fallback (download media via client)
+TG_API_ID  = int(os.getenv("TG_API_ID", "0"))
+TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
+TG_SESSION  = os.getenv("PYRO_SESSION", os.getenv("TG_SESSION", "")).strip()  # compat
+if not TG_SESSION:
+    logger.info("TG_SESSION/PYRO_SESSION non impostato: il fallback Pyrogram per >20MB non sarà disponibile.")
+
+# Webhook HTTP server (Railway/Render/Heroku)
+PUBLIC_BASE = os.getenv("PUBLIC_BASE", os.getenv("RAILWAY_STATIC_URL", "")).strip()
+PORT = int(os.getenv("PORT", "8080"))
+
+# === Utils Discord =========================================================
+def _post_with_retry(url: str, **kwargs) -> Response:
+    """Retry backoff su 429 / 5xx."""
+    for attempt in range(5):
+        r = requests.post(url, timeout=120, **kwargs)
+        if r.status_code not in (429,) and r.status_code < 500:
+            return r
+        wait = min(2 ** attempt, 30)
+        logger.warning("Discord POST %s -> %s. Retry tra %ss", url, r.status_code, wait)
+        time.sleep(wait)
+    return r
+
+def send_discord_text(webhook_url: str, content: str) -> bool:
+    if not webhook_url:
+        logger.info("Webhook Discord mancante; skip.")
+        return False
+    r = _post_with_retry(webhook_url, json={"content": content})
+    ok = 200 <= r.status_code < 300
+    if not ok:
+        logger.error("Errore Discord text: %s %s", r.status_code, r.text)
+    return ok
+
+def send_discord_file(webhook_url: str, file_bytes: bytes, filename: str, content: Optional[str] = None) -> bool:
+    if not webhook_url:
+        logger.info("Webhook Discord mancante; skip.")
+        return False
+    files = {"file": (filename, io.BytesIO(file_bytes))}
+    data = {"content": content} if content else {}
+    r = _post_with_retry(webhook_url, files=files, data=data)
+    ok = 200 <= r.status_code < 300
+    if not ok:
+        logger.error("Errore Discord file: %s %s", r.status_code, r.text)
+    return ok
+
+# === Pyrogram fallback ======================================================
+def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
     """
-    Ritorna il primo token che inizia con # (uppercase), altrimenti None.
+    Usa Pyrogram (session string) per scaricare media >20MB.
+    Restituisce path locale del file, o None su errore.
     """
-    if not text:
+    if not (TG_API_ID and TG_API_HASH and TG_SESSION):
         return None
-    words = text.strip().split()
-    if not words:
-        return None
-    first = words[0]
-    if first.startswith("#"):
-        return first.upper()
-    return None
-
-def telegram_html_to_discord(s: str) -> str:
-    """
-    Converte un sottoinsieme del markup HTML/Entities di Telegram in Markdown supportato da Discord.
-    Copre: <b>/<strong>, <i>/<em>, <u>, <s>/<strike>/<del>, <code>, <pre>, <blockquote>,
-           <a href="...">, <tg-spoiler>, entità HTML, e rimuove tag ignoti.
-    Le inline link vengono rese come: testo (url) perché Discord non supporta [testo](url) nei messaggi normali.
-    """
-    if not s:
-        return ""
-
-    # Unescape entità HTML di Telegram
-    s = html.unescape(s)
-
-    # Normalizza <br> in newline
-    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
-
-    # Blocchi <pre> -> ```code```
-    def _pre_block(m):
-        inner = m.group(1)
-        # Rimuovi eventuali <code> interni
-        inner = re.sub(r"(?is)</?code>", "", inner)
-        return f"\n```{inner}```\n"
-    s = re.sub(r"(?is)<pre[^>]*>(.*?)</pre>", _pre_block, s)
-
-    # Inline code <code> -> `code`
-    s = re.sub(r"(?is)<code[^>]*>(.*?)</code>", lambda m: f"`{m.group(1).strip()}`", s)
-
-    # Bold
-    s = re.sub(r"(?is)<(b|strong)>(.*?)</\1>", lambda m: f"**{m.group(2)}**", s)
-    # Italic
-    s = re.sub(r"(?is)<(i|em)>(.*?)</\1>", lambda m: f"*{m.group(2)}*", s)
-    # Underline
-    s = re.sub(r"(?is)<u>(.*?)</u>", lambda m: f"__{m.group(1)}__", s)
-    # Strikethrough
-    s = re.sub(r"(?is)<(s|strike|del)>(.*?)</\1>", lambda m: f"~~{m.group(2)}~~", s)
-    # Spoiler
-    s = re.sub(r"(?is)<tg-spoiler>(.*?)</tg-spoiler>", lambda m: f"||{m.group(1)}||", s)
-
-    # Blockquote
-    def _blockquote(m):
-        inner = m.group(1).strip()
-        lines = inner.splitlines()
-        return "\n".join([f"> {ln}" if ln.strip() else ">" for ln in lines])
-    s = re.sub(r"(?is)<blockquote[^>]*>(.*?)</blockquote>", _blockquote, s)
-
-    # Link <a href="...">text</a> -> "text (url)"
-    def _a(m):
-        href = m.group(1).strip()
-        text = m.group(2).strip()
-        if not text:
-            return href
-        if href:
-            return f"{text} ({href})"
-        return text
-    s = re.sub(r'(?is)<a\s+[^>]*href=["\'](.*?)["\'][^>]*>(.*?)</a>', _a, s)
-
-    # Liste (<li>) -> "- ..."; rimuoviamo <ul>/<ol>
-    s = re.sub(r"(?is)</?(ul|ol)>", "", s)
-    s = re.sub(r"(?is)<li>(.*?)</li>", lambda m: f"- {m.group(1)}\n", s)
-
-    # Rimuovi qualsiasi altro tag residuo mantenendo il testo
-    s = re.sub(r"(?is)</?[^>]+>", "", s)
-
-    # Normalizza whitespace e doppie linee
-    s = re.sub(r"\n{3,}", "\n\n", s).strip()
-
-    return s
-
-async def notify_admin(context: ContextTypes.DEFAULT_TYPE, cause: str, message_id: int):
-    """
-    Invia alert all'admin con link al messaggio sorgente (se canale privato).
-    """
-    if not TELEGRAM_ADMIN_CHAT_ID:
-        return
-    try:
-        # Link cliccabile al messaggio nel canale privato: t.me/c/<id_senza_-100>/<message_id>
-        chat_id_abs = str(abs(TELEGRAM_SOURCE_CHAT_ID))
-        # Se è un canale/supergruppo privato: rimuovi "100" iniziali
-        channel_link_part = chat_id_abs[3:] if chat_id_abs.startswith("100") else chat_id_abs
-        link = f"https://t.me/c/{channel_link_part}/{message_id}"
-        text = f"‼️ERRORE INOLTRO‼️\nCAUSA: {cause}\nID MESSAGGIO: {link}"
-        await context.bot.send_message(chat_id=int(TELEGRAM_ADMIN_CHAT_ID), text=text, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logger.error(f"Impossibile notificare admin: {e}")
-
-def get_discord_webhook_for_text(text: str) -> Optional[str]:
-    tag = first_hashtag_upper(text or "")
-    if not tag:
-        return None
-    return DISCORD_WEBHOOKS.get(tag)
-
-def strip_leading_hashtag(text: str) -> str:
-    if not text:
-        return ""
-    parts = text.strip().split(maxsplit=1)
-    if parts and parts[0].startswith("#"):
-        return parts[1] if len(parts) > 1 else ""
-    return text
-
-def build_telegram_file_url(file_path: str) -> str:
-    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-
-def post_discord_text(webhook_url: str, content: str) -> Response:
-    payload = {"content": content}
-    return requests.post(webhook_url, json=payload, timeout=60)
-
-def post_discord_embed_with_image(webhook_url: str, description: str, image_url: str) -> Response:
-    payload = {"embeds": [{"description": description, "image": {"url": image_url}}]}
-    return requests.post(webhook_url, json=payload, timeout=60)
-
-def post_discord_file(webhook_url: str, filename: str, file_bytes: bytes, description: Optional[str] = None) -> Response:
-    files = {"file": (filename, file_bytes)}
-    data = {}
-    if description:
-        data["content"] = description
-    return requests.post(webhook_url, data=data, files=files, timeout=600)
-
-def pyrogram_available() -> bool:
-    return all([PYROGRAM_API_ID, PYROGRAM_API_HASH, PYROGRAM_SESSION, TG_LOCAL_URL])
-
-def download_via_pyro_helper(chat_id: int, message_id: int) -> Optional[str]:
-    """
-    Chiama il modulo helper (se presente) per scaricare media grandi via Pyrogram + Telegram Local API.
-    Ritorna percorso del file locale, oppure None su errore.
-    """
     try:
         from pyro_helper_sync import download_media_via_pyro
     except Exception as e:
-        logger.error(f"Pyrogram helper non disponibile: {e}")
+        logger.exception("Impossibile importare pyro_helper_sync: %s", e)
         return None
-
     try:
         path = download_media_via_pyro(
-            api_id=int(PYROGRAM_API_ID),
-            api_hash=PYROGRAM_API_HASH,
-            session_string=PYROGRAM_SESSION,
-            tg_local_url=TG_LOCAL_URL,
+            api_id=TG_API_ID,
+            api_hash=TG_API_HASH,
+            session_string=TG_SESSION,
             chat_id=chat_id,
             message_id=message_id,
-            download_dir="/tmp",
+            download_dir=tempfile.gettempdir(),
         )
         return path
     except Exception as e:
-        logger.error(f"Errore Pyro helper: {e}")
+        logger.exception("Errore Pyrogram download: %s", e)
         return None
 
-# =========================
-# Handler
-# =========================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg: Optional[Message] = update.message or update.channel_post
+# === Parsing & routing ======================================================
+def pick_webhook_from_text(text: str) -> Optional[str]:
+    """
+    Cerca #SCALPING / #ALGORITMO / #FORMAZIONE (case-insensitive).
+    """
+    if not text:
+        return WEBHOOK_MAP.get("SCALPING") or DISCORD_WEBHOOK_DEFAULT or None
+
+    up = text.upper()
+    for tag, url in WEBHOOK_MAP.items():
+        if f"#{tag}" in up or f" {tag}" in up:
+            return url or DISCORD_WEBHOOK_DEFAULT or None
+    return DISCORD_WEBHOOK_DEFAULT or None
+
+def author_suffix(msg: Message) -> str:
+    if not INCLUDE_AUTHOR or not msg.from_user:
+        return ""
+    u = msg.from_user
+    handle = f"@{u.username}" if u.username else ""
+    name = u.full_name or handle or str(u.id)
+    return f"\n\n— {name} {handle}".strip()
+
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    if TELEGRAM_ADMIN_CHAT_ID:
+        try:
+            await context.bot.send_message(TELEGRAM_ADMIN_CHAT_ID, text[:4000])
+        except Exception:
+            logger.exception("notify_admin fallito")
+
+# === Handlers Telegram ======================================================
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg: Message = update.effective_message
     if not msg:
         return
-
     if msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
         return
 
-    # Testo/caption (versione HTML da Telegram) → convertiamo
-    raw_text_html = msg.text_html or msg.caption_html or ""
-    webhook_url = get_discord_webhook_for_text(raw_text_html)
-    if not webhook_url:
-        logger.info("Messaggio senza hashtag valido o webhook mancante: ignorato")
+    text = msg.caption_html or msg.text_html or ""
+    webhook_url = pick_webhook_from_text(text or "")
+
+    # Componi contenuto testuale per Discord
+    content = text or ""
+    content += author_suffix(msg)
+
+    # 1) Se non c'è media → manda solo testo
+    if not (msg.photo or msg.video or msg.document or msg.animation or msg.voice or msg.audio or msg.sticker):
+        if content.strip():
+            sent = send_discord_text(webhook_url, content)
+            if not sent:
+                await notify_admin(context, "Errore invio testo a Discord.")
         return
 
-    # Pulizia hashtag e conversione markup
-    content_for_discord = strip_leading_hashtag(telegram_html_to_discord(raw_text_html)).strip()
+    # 2) Con media: decide se usare Telegram file API o Pyrogram.
+    # Prova a ottenere file info/size
+    telegram_file_id = None
+    file_name = "file.bin"
+    file_size = 0
 
-    # ====== Contenuti senza media ======
-    if not (msg.photo or msg.video or msg.document):
-        if content_for_discord:
-            r = post_discord_text(webhook_url, content_for_discord)
-            logger.info(f"Discord text status={r.status_code}")
-        return
+    if msg.photo:
+        photo = msg.photo[-1]  # largest
+        telegram_file_id = photo.file_id
+        file_name = "image.jpg"
+        file_size = photo.file_size or 0
+    elif msg.video:
+        telegram_file_id = msg.video.file_id
+        file_name = msg.video.file_name or "video.mp4"
+        file_size = msg.video.file_size or 0
+    elif msg.document:
+        telegram_file_id = msg.document.file_id
+        file_name = msg.document.file_name or "document.bin"
+        file_size = msg.document.file_size or 0
+    elif msg.animation:
+        telegram_file_id = msg.animation.file_id
+        file_name = msg.animation.file_name or "animation.mp4"
+        file_size = msg.animation.file_size or 0
+    elif msg.audio:
+        telegram_file_id = msg.audio.file_id
+        file_name = msg.audio.file_name or "audio.mp3"
+        file_size = msg.audio.file_size or 0
+    elif msg.voice:
+        telegram_file_id = msg.voice.file_id
+        file_name = "voice.ogg"
+        file_size = msg.voice.file_size or 0
+    elif msg.sticker:
+        telegram_file_id = msg.sticker.file_id
+        file_name = "sticker.webp"
+        file_size = msg.sticker.file_size or 0
 
-    # ====== Con media ======
-    # Determina tipo e dimensione, scegliendo la strategia di upload
-    media_type = None
-    file_id = None
-    file_name = None
-    approx_size = 0
-
-    try:
-        if msg.photo:
-            media_type = "image"
-            # Foto: scegliamo l'ultima (maggiore risoluzione)
-            photo = msg.photo[-1]
-            file_id = photo.file_id
-            approx_size = getattr(photo, "file_size", 0) or 0
-            file_name = "photo.jpg"
-        elif msg.video:
-            media_type = "video"
-            file_id = msg.video.file_id
-            approx_size = getattr(msg.video, "file_size", 0) or 0
-            # prova a usare file_name del media se presente
-            file_name = (getattr(msg.video, "file_name", None) or "video.mp4")
-        elif msg.document:
-            media_type = "document"
-            file_id = msg.document.file_id
-            approx_size = getattr(msg.document, "file_size", 0) or 0
-            file_name = (getattr(msg.document, "file_name", None) or "document.bin")
-    except Exception as e:
-        await notify_admin(context, f"Errore nel parsing media: {e}", msg.message_id)
-        return
-
-    # Se il file è <= 20MB proviamo via Bot API; altrimenti fallback Pyrogram
-    use_pyro = approx_size > BOT_API_LIMIT
-
-    # ========== VIA BOT API (<=20MB) ==========
-    if not use_pyro:
+    # <20MB → scarico via getFile + HTTP; >=20MB → Pyrogram
+    if file_size and file_size < BOT_API_LIMIT:
         try:
-            fobj = await context.bot.get_file(file_id)
-            file_url = build_telegram_file_url(fobj.file_path)
-
-            if media_type == "image":
-                # Su immagini piccole possiamo usare l'embed con URL Telegram
-                # (Discord scarica l'immagine; funziona con URL file/bot<token>/...)
-                desc = content_for_discord or ""
-                r = post_discord_embed_with_image(webhook_url, desc, file_url)
-                logger.info(f"Discord embed image status={r.status_code}")
-                return
-
-            # Per video/documenti preferiamo caricare il file (Discord potrebbe non
-            # incorporare video da URL Telegram). Scarichiamo in RAM e inviamo multipart.
-            with requests.get(file_url, stream=True, timeout=600) as resp:
-                resp.raise_for_status()
-                file_bytes = resp.content
-
-            r = post_discord_file(webhook_url, file_name, file_bytes, description=content_for_discord)
-            logger.info(f"Discord file (<=20MB) status={r.status_code}")
-            return
-
-        except Exception as e:
-            # Se fallisce (es. Telegram risponde "File is too big" o altri 4xx), tentiamo Pyrogram
-            logger.warning(f"Bot API fallita, provo Pyrogram: {e}")
-            use_pyro = True
-
-    # ========== FALLBACK PYROGRAM (>20MB) ==========
-    if use_pyro:
-        if not pyrogram_available():
-            await notify_admin(context, f"Media grande (>20MB) e Pyrogram non configurato", msg.message_id)
-            return
-        local_path = download_via_pyro_helper(chat_id=msg.chat_id, message_id=msg.message_id)
-        if not local_path or not os.path.exists(local_path):
-            await notify_admin(context, f"Download via Pyrogram fallito", msg.message_id)
-            return
-        try:
-            with open(local_path, "rb") as fh:
-                file_bytes = fh.read()
-            r = post_discord_file(webhook_url, os.path.basename(local_path), file_bytes, description=content_for_discord)
-            logger.info(f"Discord file (>20MB) status={r.status_code}")
-        except Exception as e:
-            await notify_admin(context, f"Inoltro Discord fallito (Pyro): {e}", msg.message_id)
-        finally:
-            try:
-                os.remove(local_path)
-            except Exception:
-                pass
-
-# (Opzionale) gestiamo anche le modifiche: reinoltriamo come messaggio nuovo con prefisso
-async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.edited_message or update.edited_channel_post
-    if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
+            f = await context.bot.get_file(telegram_file_id)
+            # Scarico bytes e carico su Discord: NON esporre URL bot
+            resp = requests.get(f.file_path, timeout=600)
+            resp.raise_for_status()
+            ok = send_discord_file(webhook_url, resp.content, file_name, content if content.strip() else None)
+            if not ok:
+                await notify_admin(context, f"Errore invio file <20MB a Discord: {file_name}")
+        except Exception:
+            logger.exception("Errore download <20MB via Bot API")
+            await notify_admin(context, "Errore download <20MB via Bot API")
         return
-    raw_text_html = msg.text_html or msg.caption_html or ""
-    webhook_url = get_discord_webhook_for_text(raw_text_html)
-    if not webhook_url:
-        return
-    content = strip_leading_hashtag(telegram_html_to_discord(raw_text_html)).strip()
-    if content:
-        content = f"✏️ Messaggio modificato:\n{content}"
-        r = post_discord_text(webhook_url, content)
-        logger.info(f"Discord edit text status={r.status_code}")
 
-# Error handler per evitare crash silenziosi
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.exception("Eccezione non gestita", exc_info=context.error)
+    # Fallback Pyrogram (file grandi o size ignota)
     try:
-        if TELEGRAM_ADMIN_CHAT_ID:
-            await context.bot.send_message(
-                chat_id=int(TELEGRAM_ADMIN_CHAT_ID),
-                text=f"⚠️ Errore: {context.error}",
-            )
+        path = pyro_download_by_ids(msg.chat_id, msg.message_id)
+        if not path:
+            await notify_admin(context, "Download via Pyrogram fallito o non configurato.")
+            return
+        with open(path, "rb") as fh:
+            data = fh.read()
+        ok = send_discord_file(webhook_url, data, os.path.basename(path), content if content.strip() else None)
+        if not ok:
+            await notify_admin(context, "Errore invio file >20MB a Discord.")
     except Exception:
-        pass
+        logger.exception("Errore generale gestione media")
+        await notify_admin(context, "Errore generale gestione media")
 
-# =========================
-# MAIN (Webhook mode)
-# =========================
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+async def on_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not FORWARD_EDITS:
+        return
+    # per semplicità, riutilizza on_message (inoltra come nuovo)
+    await on_message(update, context)
 
-    # Handlers
-    app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
-    app.add_error_handler(on_error)
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bot attivo. Inoltro da chat sorgente verso Discord.")
 
-    # Log
-    logger.info("✅ Bridge avviato in modalità webhook...")
+# === Main ==================================================================
+def build_application() -> Application:
+    return ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Costruzione webhook URL pubblico
+def add_handlers(app: Application) -> None:
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(MessageHandler(filters.ALL & (~filters.StatusUpdate.ALL), on_message))
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED, on_edited_message))
+
+def run_webhook(app: Application) -> None:
     if not PUBLIC_BASE:
-        raise RuntimeError("Devi impostare WEBHOOK_BASE_URL o RAILWAY_STATIC_URL per esporre il webhook.")
-    webhook_full = f"{PUBLIC_BASE.rstrip('/')}/{BOT_TOKEN}"
-
-    # Avvio webhook (gestisce da solo l'event loop)
+        raise RuntimeError("Devi impostare PUBLIC_BASE o RAILWAY_STATIC_URL per esporre il webhook.")
+    # Path segreto col token per semplicità
+    path = f"/{BOT_TOKEN}"
+    logger.info("Avvio webhook su 0.0.0.0:%s, path=%s, base=%s", PORT, path, PUBLIC_BASE)
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=BOT_TOKEN,           # path 'segreto'
-        webhook_url=webhook_full,     # URL pubblico su cui Telegram invierà gli update
-        secret_token=None,            # opzionale
+        url_path=path,
+        webhook_url=(PUBLIC_BASE.rstrip("/") + path),
+        drop_pending_updates=True,
     )
+
+if __name__ == "__main__":
+    app = build_application()
+    add_handlers(app)
+    mode = os.getenv("MODE", "webhook").lower()
+    if mode == "polling":
+        logger.info("Avvio in polling...")
+        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    else:
+        run_webhook(app)
+
 
 if __name__ == "__main__":
     main()
