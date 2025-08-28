@@ -9,6 +9,7 @@ import tempfile
 import shutil
 import subprocess
 import sqlite3
+import asyncio
 from html import unescape
 from typing import Optional, Tuple, List
 
@@ -46,7 +47,7 @@ if not BOT_TOKEN:
 TELEGRAM_SOURCE_CHAT_ID = int(os.getenv("TELEGRAM_SOURCE_CHAT_ID", "0"))
 TELEGRAM_ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 
-FORWARD_EDITS = env_bool("FORWARD_EDITS", False)   # continua a gestire in tempo reale, ma abbiamo anche la riconciliazione
+FORWARD_EDITS = env_bool("FORWARD_EDITS", False)
 INCLUDE_AUTHOR = env_bool("INCLUDE_AUTHOR", False)
 
 # Webhooks Discord
@@ -80,7 +81,7 @@ else:
 PUBLIC_BASE = os.getenv("PUBLIC_BASE", os.getenv("RAILWAY_STATIC_URL", "")).strip()
 PORT = int(os.getenv("PORT", "8080"))
 
-# Cache canali già “visti” dallo userbot
+# Cache canali “visti” dallo userbot
 PYRO_KNOWN_CHATS: set[int] = set()
 
 # Stato bot (per log)
@@ -94,7 +95,7 @@ DB_PATH = os.path.join(DATA_DIR, "map.sqlite")
 
 
 # =========================
-# SQLite mapping Telegram ↔ Discord
+# SQLite mapping Telegram ↔ Discord (con thread_id)
 # =========================
 def db_init():
     con = sqlite3.connect(DB_PATH)
@@ -108,27 +109,37 @@ def db_init():
             webhook_url TEXT NOT NULL,
             last_content TEXT,
             deleted INTEGER NOT NULL DEFAULT 0,
+            discord_channel_id TEXT,
+            discord_thread_id TEXT,
             PRIMARY KEY (tg_chat_id, tg_message_id)
         )
         """)
+        # migrazioni soft-add per sicurezza (ignora errori se esistono già)
+        try: con.execute("ALTER TABLE map ADD COLUMN discord_channel_id TEXT")
+        except Exception: pass
+        try: con.execute("ALTER TABLE map ADD COLUMN discord_thread_id TEXT")
+        except Exception: pass
         con.commit()
     finally:
         con.close()
 
 def db_upsert_mapping(tg_chat_id: int, tg_message_id: int, tg_edit_ts: int,
-                      discord_message_id: str, webhook_url: str, last_content: str):
+                      discord_message_id: str, webhook_url: str, last_content: str,
+                      discord_channel_id: Optional[str], discord_thread_id: Optional[str]):
     con = sqlite3.connect(DB_PATH)
     try:
         con.execute("""
-        INSERT INTO map (tg_chat_id, tg_message_id, tg_edit_ts, discord_message_id, webhook_url, last_content, deleted)
-        VALUES (?, ?, ?, ?, ?, ?, 0)
+        INSERT INTO map (tg_chat_id, tg_message_id, tg_edit_ts, discord_message_id, webhook_url, last_content, deleted, discord_channel_id, discord_thread_id)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
         ON CONFLICT(tg_chat_id, tg_message_id) DO UPDATE SET
             tg_edit_ts=excluded.tg_edit_ts,
             discord_message_id=excluded.discord_message_id,
             webhook_url=excluded.webhook_url,
             last_content=excluded.last_content,
-            deleted=0
-        """, (tg_chat_id, tg_message_id, tg_edit_ts, discord_message_id, webhook_url, last_content))
+            deleted=0,
+            discord_channel_id=excluded.discord_channel_id,
+            discord_thread_id=excluded.discord_thread_id
+        """, (tg_chat_id, tg_message_id, tg_edit_ts, discord_message_id, webhook_url, last_content, discord_channel_id, discord_thread_id))
         con.commit()
     finally:
         con.close()
@@ -150,15 +161,15 @@ def db_update_edit_ts_and_content(tg_chat_id: int, tg_message_id: int, edit_ts: 
     finally:
         con.close()
 
-def db_get_recent_mappings(tg_chat_id: int, limit: int = 10) -> List[Tuple[int, str, str, int, str]]:
+def db_get_recent_mappings(tg_chat_id: int, limit: int = 10) -> List[Tuple[int, str, str, int, str, Optional[str]]]:
     """
-    Ritorna lista di (tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content)
+    Ritorna (tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id)
     ultimi N messaggi non cancellati.
     """
     con = sqlite3.connect(DB_PATH)
     try:
         cur = con.execute("""
-          SELECT tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content
+          SELECT tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id
           FROM map
           WHERE tg_chat_id=? AND deleted=0
           ORDER BY tg_message_id DESC
@@ -194,37 +205,28 @@ def tg_html_to_discord_md(html: str) -> str:
     if not html:
         return ""
     s = unescape(html)
-    # bold / italic / underline / strike
     s = re.sub(r"</?(b|strong)>", "**", s, flags=re.I)
     s = re.sub(r"</?(i|em)>", "*", s, flags=re.I)
     s = re.sub(r"<u>(.*?)</u>", r"__\1__", s, flags=re.I | re.S)
     s = re.sub(r"<(s|del)>(.*?)</\1>", r"~~\2~~", s, flags=re.I | re.S)
-    # inline code
     s = re.sub(r"<code>(.*?)</code>", r"`\1`", s, flags=re.I | re.S)
-    # code block con language
     s = re.sub(
         r"<pre.*?>\s*<code.*?class=['\"]?language-([\w+\-]+)['\"]?.*?>(.*?)</code>\s*</pre>",
         r"```\1\n\2\n```", s, flags=re.I | re.S
     )
-    # code block generico
     s = re.sub(r"<pre.*?>(.*?)</pre>", r"```\n\1\n```", s, flags=re.I | re.S)
-    # link e spoiler
     s = re.sub(r'<a\s+href=["\'](.*?)["\']>(.*?)</a>', r"[\2](\1)", s, flags=re.I | re.S)
     s = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"||\1||", s, flags=re.I | re.S)
-    # blockquote semplice
     s = re.sub(r"<blockquote>(.*?)</blockquote>", r">\1", s, flags=re.I | re.S)
-    # rimuovi tag residui
     s = re.sub(r"</?[^>]+>", "", s)
-    # evita ping accidentali
     s = s.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
-    # normalizza spazi
     s = re.sub(r"[ \t]+\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     return s
 
 
 # =========================
-# Discord helpers (con wait=true e edit/delete)
+# Discord helpers (con wait=true e thread_id)
 # =========================
 def _ensure_wait(url: str) -> str:
     return url + ("&wait=true" if "?" in url else "?wait=true")
@@ -259,69 +261,84 @@ def _delete_with_retry(url: str, **kwargs) -> Response:
         time.sleep(wait)
     return r
 
-def send_discord_text(webhook_url: str, content: str) -> Tuple[bool, Optional[str]]:
+def send_discord_text(webhook_url: str, content: str) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+    """Ritorna (ok, message_id, channel_id, thread_id?)"""
     if not webhook_url:
         logger.info("Discord: nessun webhook configurato, salto invio testo.")
-        return False, None
+        return False, None, None, None
     url = _ensure_wait(webhook_url)
     r = _post_with_retry(url, json={"content": content})
-    ok = 200 <= r.status_code < 300
-    msg_id = None
-    if ok:
+    ok, msg_id, ch_id, th_id = False, None, None, None
+    if 200 <= r.status_code < 300:
         try:
-            msg_id = r.json().get("id")
+            j = r.json()
+            msg_id = j.get("id")
+            ch_id = j.get("channel_id")
+            th_id = ch_id  # se è thread, channel_id del messaggio è il thread id
+            ok = True
         except Exception:
-            pass
+            ok = True
     logger.log(logging.INFO if ok else logging.ERROR,
                "Discord: risposta invio testo -> %s (%s)", r.status_code, r.text[:200])
-    return ok, msg_id
+    return ok, msg_id, ch_id, th_id
 
-def send_discord_file_bytes(webhook_url: str, file_bytes: bytes, filename: str, content: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+def send_discord_file_bytes(webhook_url: str, file_bytes: bytes, filename: str, content: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
     if not webhook_url:
         logger.info("Discord: nessun webhook configurato, salto invio file.")
-        return False, None
+        return False, None, None, None
     url = _ensure_wait(webhook_url)
     logger.info("Discord: upload file '%s' (%d bytes).", filename, len(file_bytes or b""))
     files = {"file": (filename, io.BytesIO(file_bytes))}
     data = {"content": content} if content else {}
     r = _post_with_retry(url, files=files, data=data)
-    ok = 200 <= r.status_code < 300
-    msg_id = None
-    if ok:
+    ok, msg_id, ch_id, th_id = False, None, None, None
+    if 200 <= r.status_code < 300:
         try:
-            msg_id = r.json().get("id")
+            j = r.json()
+            msg_id = j.get("id")
+            ch_id = j.get("channel_id")
+            th_id = ch_id
+            ok = True
         except Exception:
-            pass
+            ok = True
     logger.log(logging.INFO if ok else logging.ERROR,
                "Discord: risposta upload file -> %s (%s)", r.status_code, r.text[:200])
-    return ok, msg_id
+    return ok, msg_id, ch_id, th_id
 
-def send_discord_file_path(webhook_url: str, path: str, content: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+def send_discord_file_path(webhook_url: str, path: str, content: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
     with open(path, "rb") as fh:
         data = fh.read()
     name = os.path.basename(path)
     return send_discord_file_bytes(webhook_url, data, name, content)
 
-def edit_discord_message(webhook_url: str, message_id: str, new_content: str) -> bool:
+def edit_discord_message(webhook_url: str, message_id: str, new_content: str, thread_id: Optional[str] = None) -> bool:
     url = f"{webhook_url}/messages/{message_id}"
-    url = _ensure_wait(url)
+    if thread_id:
+        url += f"?thread_id={thread_id}"
+        url = _ensure_wait(url)
+    else:
+        url = _ensure_wait(url)
     r = _patch_with_retry(url, json={"content": new_content})
     ok = 200 <= r.status_code < 300
     logger.log(logging.INFO if ok else logging.ERROR,
                "Discord: edit -> %s (%s)", r.status_code, r.text[:200])
     return ok
 
-def delete_discord_message(webhook_url: str, message_id: str) -> bool:
+def delete_discord_message(webhook_url: str, message_id: str, thread_id: Optional[str] = None) -> bool:
     url = f"{webhook_url}/messages/{message_id}"
+    if thread_id:
+        url += f"?thread_id={thread_id}"
     r = _delete_with_retry(url)
-    ok = 200 <= r.status_code < 300 or r.status_code == 404  # 404 => già cancellato
-    logger.log(logging.INFO if ok else logging.ERROR,
-               "Discord: delete -> %s (%s)", r.status_code, r.text[:200])
-    return ok
+    if 200 <= r.status_code < 300 or r.status_code == 404:
+        logger.info("Discord: delete -> %s", r.status_code)
+        return True
+    logger.warning("Discord: delete fallito (%s). Fallback tombstone.", r.status_code)
+    # fallback: edit a "eliminato"
+    return edit_discord_message(webhook_url, message_id, "*(eliminato su Telegram)*", thread_id=thread_id)
 
 
 # =========================
-# Bot-side: crea autoinvite
+# Bot-side: crea autoinvite (per Pyrogram)
 # =========================
 async def _get_autoinvite_for_pyro(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Optional[str]:
     logger.info("Autoinvite: provo a creare un link di invito via Bot API per chat_id=%s", chat_id)
@@ -341,7 +358,7 @@ async def _get_autoinvite_for_pyro(context: ContextTypes.DEFAULT_TYPE, chat_id: 
 
 
 # =========================
-# Pyrogram fallback (async download)
+# Pyrogram fallback (async download via helper)
 # =========================
 async def pyro_download_by_ids(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int
@@ -428,7 +445,6 @@ def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES)
     base_dir = os.path.dirname(input_path) or tempfile.gettempdir()
     base_name = os.path.splitext(os.path.basename(input_path))[0]
 
-    # calcolo bitrate di base per stare sotto max_bytes (margine 5%)
     safety = 0.95
     target_bits_total = max_bytes * 8 * safety  # bytes -> bit
     base_audio_kbps = 128
@@ -550,7 +566,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("MSG: chat non monitorata (%s != %s). Ignoro.", msg.chat_id, TELEGRAM_SOURCE_CHAT_ID)
         return
 
-    # HTML Telegram -> Markdown Discord
     text_html = msg.caption_html or msg.text_html or ""
     text_md = tg_html_to_discord_md(text_html)
     logger.debug("MSG: testo convertito (len=%d).", len(text_md or ""))
@@ -559,20 +574,21 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = (text_md or "").strip()
     content += author_suffix(msg)
 
-    # Solo testo?
+    # media?
     has_media = any([msg.photo, msg.video, msg.document, msg.animation, msg.voice, msg.audio, msg.sticker])
 
     discord_id = None
+    discord_ch = None
+    discord_thread = None
     path = None
     comp_path = None
     try:
         if not has_media:
             logger.info("MSG: solo testo. Invio verso Discord.")
-            ok, discord_id = send_discord_text(webhook_url, content)
+            ok, discord_id, discord_ch, discord_thread = send_discord_text(webhook_url, content)
             if not ok:
                 await notify_admin(context, "Errore invio testo a Discord.")
         else:
-            # Con media: raccogli info minime
             telegram_file_id = None
             file_name = "file.bin"
             file_size_tg = 0
@@ -618,7 +634,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_size_tg = msg.sticker.file_size or 0
                 logger.info("MSG: media=sticker size=%s", file_size_tg)
 
-            # <20MB → Bot API (getFile), >=20MB → Pyrogram
+            # <20MB → Bot API
             if file_size_tg and file_size_tg < BOT_API_LIMIT:
                 logger.info("FLOW: uso Bot API (file < 20MB).")
                 f = await context.bot.get_file(telegram_file_id)
@@ -635,7 +651,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await notify_admin(context, "Download via Pyrogram fallito o non configurato.")
                     return
 
-            # Se il file è >100MB ed è video → compressione
+            # compressione se necessario
             if is_video and file_size(path) > DISCORD_MAX_BYTES:
                 logger.info("Limite Discord: file %s è %s (> 100MB). Avvio compressione.",
                             os.path.basename(path), human_size(file_size(path)))
@@ -643,7 +659,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if comp_path and file_size(comp_path) <= DISCORD_MAX_BYTES:
                     logger.info("Compressione OK: %s", human_size(file_size(comp_path)))
-                    ok, discord_id = send_discord_file_path(webhook_url, comp_path, content if content.strip() else None)
+                    ok, discord_id, discord_ch, discord_thread = send_discord_file_path(webhook_url, comp_path, content if content.strip() else None)
                     if not ok:
                         await notify_admin(context, "Errore invio file compresso a Discord.")
                 else:
@@ -653,9 +669,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"- Compressione: {'ffmpeg non disponibile/durata non nota' if not ffmpeg_available() else 'non sufficiente'}\n"
                         f"Soluzione: carica su un host esterno (Drive/Streamable) o aumenta risorse del container."
                     )
-                    ok, discord_id = send_discord_text(webhook_url, (content + "\n\n" + warn).strip())
+                    ok, discord_id, discord_ch, discord_thread = send_discord_text(webhook_url, (content + "\n\n" + warn).strip())
             else:
-                ok, discord_id = send_discord_file_path(webhook_url, path, content if content.strip() else None)
+                ok, discord_id, discord_ch, discord_thread = send_discord_file_path(webhook_url, path, content if content.strip() else None)
                 if not ok:
                     await notify_admin(context, "Errore invio file a Discord.")
     except Exception:
@@ -670,13 +686,16 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 logger.debug("Cleanup: rimozione file temp fallita", exc_info=True)
 
-    # Salva mapping Telegram -> Discord per edit/delete tracking
+    # salva mapping per edit/delete
     try:
         if discord_id:
-            # timestamp di riferimento: edited o date
             edit_ts = int((msg.edit_date or msg.date).timestamp()) if (msg.edit_date or msg.date) else int(time.time())
-            last_content = (content or "")[:2000]  # Discord limit
-            db_upsert_mapping(msg.chat_id, msg.message_id, edit_ts, discord_id, webhook_url or "", last_content)
+            last_content = (content or "")[:2000]
+            db_upsert_mapping(
+                msg.chat_id, msg.message_id, edit_ts,
+                discord_id, webhook_url or "", last_content,
+                discord_ch, discord_thread
+            )
     except Exception:
         logger.exception("Mapping: upsert fallito.")
 
@@ -693,17 +712,16 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Reconciliation job (ogni 10s sugli ultimi 10 messaggi)
+# Reconciliation job (ogni 10s sugli ultimi 10 msg)
 # =========================
 async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
     if not (TG_API_ID and TG_API_HASH and TG_SESSION):
-        return  # serve Pyrogram per leggere la history
+        return
     try:
         recent = db_get_recent_mappings(TELEGRAM_SOURCE_CHAT_ID, limit=10)
         if not recent:
             return
 
-        # Crea un client Pyrogram temporaneo per leggere i messaggi
         from pyrogram import Client
         from pyrogram.errors import RPCError, MessageIdInvalid
 
@@ -715,48 +733,39 @@ async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
             no_updates=True,
             workdir=tempfile.gettempdir(),
         ) as app:
-            # Prova a risolvere il peer una volta
             try:
                 await app.get_chat(TELEGRAM_SOURCE_CHAT_ID)
             except Exception:
-                # se non risolvibile, salta tutto il ciclo
                 logger.debug("Reconcile: get_chat fallita; salto iterazione.")
                 return
 
-            for tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content in recent:
-                # Leggi il messaggio
+            for tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id in recent:
                 m = None
                 try:
                     m = await app.get_messages(TELEGRAM_SOURCE_CHAT_ID, tg_message_id)
                 except MessageIdInvalid:
                     m = None
                 except RPCError as e:
-                    logger.debug("Reconcile: get_messages RPCError per %s: %s", tg_message_id, e)
+                    logger.debug("Reconcile: RPCError per %s: %s", tg_message_id, e)
                     m = None
                 except Exception as e:
-                    logger.debug("Reconcile: errore generico su %s: %s", tg_message_id, e)
+                    logger.debug("Reconcile: errore %s su %s", e, tg_message_id)
                     m = None
 
                 if m is None:
-                    # Messaggio probabilmente cancellato → elimina su Discord e marca deleted
-                    ok = delete_discord_message(webhook_url, discord_message_id)
+                    ok = delete_discord_message(webhook_url, discord_message_id, thread_id=discord_thread_id)
                     if ok:
                         db_mark_deleted(TELEGRAM_SOURCE_CHAT_ID, tg_message_id)
                         logger.info("Reconcile: cancellato su Discord (tg_id=%s -> dc_id=%s).",
                                     tg_message_id, discord_message_id)
                     continue
 
-                # Messaggio esiste: controlla modifiche
-                # Pyrogram non fornisce facilmente l'HTML; prendiamo text/caption plain
                 plain = (m.caption or m.text or "").strip()
-                # aggiungi eventuale author suffix come da invio
-                # (NB: qui non abbiamo l'oggetto ptb.Message; non aggiungiamo suffix per evitare mismatch)
                 new_content = plain[:2000]
                 new_edit_ts = int((getattr(m, "edit_date", None) or getattr(m, "date", None)).timestamp()) if (getattr(m, "edit_date", None) or getattr(m, "date", None)) else tg_edit_ts
 
                 if new_edit_ts > tg_edit_ts or (new_content and new_content != (last_content or "")):
-                    # sincronizza l'edit su Discord
-                    ok = edit_discord_message(webhook_url, discord_message_id, new_content)
+                    ok = edit_discord_message(webhook_url, discord_message_id, new_content, thread_id=discord_thread_id)
                     if ok:
                         db_update_edit_ts_and_content(TELEGRAM_SOURCE_CHAT_ID, tg_message_id, new_edit_ts, new_content)
                         logger.info("Reconcile: edit sincronizzato (tg_id=%s).", tg_message_id)
@@ -766,7 +775,7 @@ async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Startup: verifica permessi e stampa setup
+# Startup & wiring (polling con fallback JobQueue)
 # =========================
 async def _post_init(app: Application) -> None:
     global BOT_ID, BOT_USERNAME
@@ -788,13 +797,21 @@ async def _post_init(app: Application) -> None:
     logger.info("Pyrogram enabled=%s (API_ID set=%s, SESSION set=%s)",
                 bool(TG_SESSION), bool(TG_API_ID and TG_API_HASH), bool(TG_SESSION))
 
-    # Avvia reconciliation job ogni 10 secondi
-    app.job_queue.run_repeating(reconcile_last_messages, interval=10, first=10)
+    # JobQueue se disponibile, altrimenti loop asyncio
+    if getattr(app, "job_queue", None):
+        app.job_queue.run_repeating(reconcile_last_messages, interval=10, first=10)
+    else:
+        logger.warning('JobQueue assente: fallback a loop asyncio ogni 10s.')
+        async def _reconcile_loop():
+            while True:
+                try:
+                    await reconcile_last_messages(None)
+                except Exception:
+                    logger.exception("Reconcile loop: errore")
+                await asyncio.sleep(10)
+        app.create_task(_reconcile_loop())
 
 
-# =========================
-# App wiring (polling)
-# =========================
 def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.post_init = _post_init
@@ -814,4 +831,5 @@ if __name__ == "__main__":
     application = build_application()
     add_handlers(application)
     run_polling(application)
+
 
