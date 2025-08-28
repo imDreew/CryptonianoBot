@@ -1,7 +1,6 @@
 import os
 import io
 import time
-import json
 import logging
 import tempfile
 import re
@@ -71,56 +70,40 @@ if not TG_SESSION:
 PUBLIC_BASE = os.getenv("PUBLIC_BASE", os.getenv("RAILWAY_STATIC_URL", "")).strip()
 PORT = int(os.getenv("PORT", "8080"))
 
+# Cache canali già “visti” dallo userbot
+PYRO_KNOWN_CHATS: set[int] = set()
+
 
 # =========================
 # HTML Telegram -> Markdown Discord
 # =========================
 def tg_html_to_discord_md(html: str) -> str:
-    """
-    Converte la formattazione HTML di Telegram in Markdown compatibile con Discord.
-    Copre: b/strong, i/em, u, s/del, code, pre/code (con o senza language),
-           a href, tg-spoiler, blockquote e rimuove i tag residui.
-    Neutralizza @everyone/@here.
-    """
     if not html:
         return ""
-
     s = unescape(html)
-
     # bold / italic / underline / strike
     s = re.sub(r"</?(b|strong)>", "**", s, flags=re.I)
     s = re.sub(r"</?(i|em)>", "*", s, flags=re.I)
     s = re.sub(r"<u>(.*?)</u>", r"__\1__", s, flags=re.I | re.S)
     s = re.sub(r"<(s|del)>(.*?)</\1>", r"~~\2~~", s, flags=re.I | re.S)
-
     # inline code
     s = re.sub(r"<code>(.*?)</code>", r"`\1`", s, flags=re.I | re.S)
-
-    # code block con language: <pre><code class="language-...">...</code></pre>
+    # code block con language
     s = re.sub(
         r"<pre.*?>\s*<code.*?class=['\"]?language-([\w+\-]+)['\"]?.*?>(.*?)</code>\s*</pre>",
-        r"```\1\n\2\n```",
-        s,
-        flags=re.I | re.S,
+        r"```\1\n\2\n```", s, flags=re.I | re.S
     )
-    # code block generico: <pre>...</pre>
+    # code block generico
     s = re.sub(r"<pre.*?>(.*?)</pre>", r"```\n\1\n```", s, flags=re.I | re.S)
-
-    # link
+    # link e spoiler
     s = re.sub(r'<a\s+href=["\'](.*?)["\']>(.*?)</a>', r"[\2](\1)", s, flags=re.I | re.S)
-
-    # spoiler
     s = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"||\1||", s, flags=re.I | re.S)
-
     # blockquote semplice
     s = re.sub(r"<blockquote>(.*?)</blockquote>", r">\1", s, flags=re.I | re.S)
-
-    # rimuovi qualsiasi altro tag residuo
+    # rimuovi tag residui
     s = re.sub(r"</?[^>]+>", "", s)
-
     # evita ping accidentali
     s = s.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
-
     # normalizza spazi
     s = re.sub(r"[ \t]+\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
@@ -131,7 +114,6 @@ def tg_html_to_discord_md(html: str) -> str:
 # Discord helpers
 # =========================
 def _post_with_retry(url: str, **kwargs) -> Response:
-    """Retry con backoff su 429 / 5xx."""
     for attempt in range(5):
         r = requests.post(url, timeout=120, **kwargs)
         if r.status_code not in (429,) and r.status_code < 500:
@@ -167,12 +149,36 @@ def send_discord_file(webhook_url: str, file_bytes: bytes, filename: str, conten
 
 
 # =========================
+# Bot-side: crea autoinvite
+# =========================
+async def _get_autoinvite_for_pyro(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Optional[str]:
+    """
+    Crea un invite link (se il BOT è admin con permesso di invitare).
+    Ritorna l'URL o None se non possibile.
+    """
+    try:
+        link = await context.bot.create_chat_invite_link(
+            chat_id=chat_id,
+            name="bridge-autoinvite",
+            creates_join_request=False,
+            expire_date=None,
+            member_limit=0,
+        )
+        return link.invite_link
+    except Exception as e:
+        logger.info("Impossibile creare invite via Bot API (permessi?): %s", e)
+        return None
+
+
+# =========================
 # Pyrogram fallback (async)
 # =========================
-async def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
+async def pyro_download_by_ids(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int
+) -> Optional[str]:
     """
     Usa Pyrogram (session string) per scaricare media >20MB.
-    Restituisce path locale del file, o None su errore.
+    - Se lo userbot non conosce il canale, prova a generare un autoinvite e joinare.
     """
     if not (TG_API_ID and TG_API_HASH and TG_SESSION):
         return None
@@ -181,6 +187,11 @@ async def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
     except Exception as e:
         logger.exception("Impossibile importare helper Pyrogram: %s", e)
         return None
+
+    invite_link = None
+    if chat_id not in PYRO_KNOWN_CHATS:
+        invite_link = await _get_autoinvite_for_pyro(context, chat_id)
+
     try:
         path = await download_media_via_pyro_async(
             api_id=TG_API_ID,
@@ -189,7 +200,9 @@ async def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
             chat_id=chat_id,
             message_id=message_id,
             download_dir=tempfile.gettempdir(),
+            invite_link=invite_link,
         )
+        PYRO_KNOWN_CHATS.add(chat_id)
         return path
     except Exception as e:
         logger.exception("Errore Pyrogram download: %s", e)
@@ -206,7 +219,6 @@ def pick_webhook_from_text(text: str) -> Optional[str]:
     """
     if not text:
         return WEBHOOK_MAP.get("SCALPING") or DISCORD_WEBHOOK_DEFAULT or None
-
     up = text.upper()
     for tag, url in WEBHOOK_MAP.items():
         if f"#{tag}" in up or f" {tag}" in up:
@@ -247,7 +259,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     webhook_url = pick_webhook_from_text(text_md or "")
 
-    # Componi contenuto per Discord (testo + autore opzionale)
+    # Contenuto per Discord (testo + autore opzionale)
     content = (text_md or "").strip()
     content += author_suffix(msg)
 
@@ -265,7 +277,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_size = 0
 
     if msg.photo:
-        photo = msg.photo[-1]  # largest
+        photo = msg.photo[-1]
         telegram_file_id = photo.file_id
         file_name = "image.jpg"
         file_size = photo.file_size or 0
@@ -308,9 +320,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify_admin(context, "Errore download <20MB via Bot API")
         return
 
-    # >=20MB o size ignota → Pyrogram (async)
+    # >=20MB o size ignota → Pyrogram (async) con autoinvite
     try:
-        path = await pyro_download_by_ids(msg.chat_id, msg.message_id)
+        path = await pyro_download_by_ids(context, msg.chat_id, msg.message_id)
         if not path:
             await notify_admin(context, "Download via Pyrogram fallito o non configurato.")
             return
@@ -327,7 +339,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not FORWARD_EDITS:
         return
-    # Semplicemente reinoltra come nuovo
     await on_message(update, context)
 
 
@@ -345,7 +356,6 @@ def build_application() -> Application:
 def add_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(MessageHandler(filters.ALL & (~filters.StatusUpdate.ALL), on_message))
-    # handler per i messaggi editati (se attivo)
     app.add_handler(MessageHandler(filters.UpdateType.EDITED, on_edited_message))
 
 
@@ -372,4 +382,5 @@ if __name__ == "__main__":
         app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
     else:
         run_webhook(app)
+
 
