@@ -413,7 +413,7 @@ def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES)
 # =========================
 def pick_webhook_from_text(text: str) -> Optional[str]:
     """
-    Cerca #SCALPING / #ALGORITMO / #FORMAZIONE (case-insensitive).
+    Cerca #SCALPING / #RISULTATI / #FORMAZIONE (case-insensitive).
     Fallback su DISCORD_WEBHOOK_DEFAULT se non matcha nulla.
     """
     up = (text or "").upper()
@@ -613,8 +613,8 @@ async def _post_init(app: Application) -> None:
     logger.info("Source chat: %s | Admin notify: %s", TELEGRAM_SOURCE_CHAT_ID, TELEGRAM_ADMIN_CHAT_ID)
     logger.info("Flags: FORWARD_EDITS=%s INCLUDE_AUTHOR=%s", FORWARD_EDITS, INCLUDE_AUTHOR)
     logger.info(
-        "Discord webhooks: SCALPING=%s ALGORITMO=%s FORMAZIONE=%s DEFAULT=%s",
-        bool(DISCORD_WEBHOOK_SCALPING), bool(DISCORD_WEBHOOK_ALGORITMO),
+        "Discord webhooks: SCALPING=%s RISULTATI=%s FORMAZIONE=%s DEFAULT=%s",
+        bool(DISCORD_WEBHOOK_SCALPING), bool(DISCORD_WEBHOOK_RISULTATI),
         bool(DISCORD_WEBHOOK_FORMAZIONE), bool(DISCORD_WEBHOOK_DEFAULT)
     )
     logger.info("Pyrogram enabled=%s (API_ID set=%s, SESSION set=%s)",
