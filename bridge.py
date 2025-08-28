@@ -3,6 +3,7 @@ import os
 import io
 import re
 import time
+import math
 import logging
 import tempfile
 import shutil
@@ -65,7 +66,7 @@ BOT_API_LIMIT = 20 * 1024 * 1024  # 20MB
 # Discord hard limit
 DISCORD_MAX_BYTES = 100 * 1024 * 1024  # 100MB
 
-# Pyrogram fallback (per file >20MB)
+# Pyrogram fallback (per file >20MB) — sessione **utente**
 TG_API_ID   = int(os.getenv("TG_API_ID", "0"))
 TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
 TG_SESSION  = os.getenv("PYRO_SESSION", os.getenv("TG_SESSION", "")).strip()
@@ -96,11 +97,12 @@ def file_size(path: str) -> int:
         return 0
 
 def human_size(n: int) -> str:
+    x = float(n)
     for unit in ["B","KB","MB","GB","TB"]:
-        if n < 1024 or unit == "TB":
-            return f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}B"
+        if x < 1024 or unit == "TB":
+            return f"{x:.1f}{unit}"
+        x /= 1024
+    return f"{x:.1f}B"
 
 
 # =========================
@@ -256,7 +258,7 @@ async def pyro_download_by_ids(
 
 
 # =========================
-# Video compression with ffmpeg
+# FFmpeg / Compressione ABR
 # =========================
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
@@ -265,62 +267,144 @@ def is_video_filename(name: str) -> bool:
     name = (name or "").lower()
     return any(name.endswith(ext) for ext in (".mp4",".mov",".mkv",".webm",".avi",".m4v"))
 
+def probe_duration_seconds(input_path: str) -> Optional[float]:
+    """Ritorna la durata in secondi usando ffprobe, oppure None."""
+    if not ffmpeg_available():
+        return None
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            input_path
+        ]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=30)
+        return float(out.decode().strip())
+    except Exception as e:
+        logger.warning("FFprobe: impossibile leggere durata: %s", e)
+        return None
+
 def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES) -> Optional[str]:
     """
-    Tenta compressioni multi-pass CRF 28→30→32→35 con downscale max 1920x1080 e audio AAC 128k.
+    Transcodifica singola a bitrate calcolato (ABR) per stare sotto max_bytes.
+    - Stima bitrate = (max_bytes * 8 / duration) * safety
+    - Limita risorse: threads=1, preset veryfast
+    - Scala max 1920x1080, audio AAC 128k (o meno se necessario)
     Ritorna il path del file compresso se <= max_bytes, altrimenti None.
     """
     if not ffmpeg_available():
         logger.warning("ffmpeg non disponibile nel sistema: impossibile comprimere.")
         return None
 
+    duration = probe_duration_seconds(input_path)
+    if not duration or duration <= 0:
+        logger.warning("FFmpeg: durata non disponibile; salto compressione ABR.")
+        return None
+
     base_dir = os.path.dirname(input_path) or tempfile.gettempdir()
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-    crfs = [28, 30, 32, 35]
-
-    for crf in crfs:
-        out_path = os.path.join(base_dir, f"{base_name}_crf{crf}.mp4")
+    out_path = os.path.join(base_dir, f"{base_name}_abr.mp4")
+    try:
         if os.path.exists(out_path):
-            try:
-                os.remove(out_path)
-            except Exception:
-                pass
+            os.remove(out_path)
+    except Exception:
+        pass
 
-        cmd = [
-            "ffmpeg",
-            "-y",
+    # Obiettivo: stare sotto max_bytes con ~5% margine di sicurezza
+    safety = 0.95
+    target_bits_total = max_bytes * 8 * safety  # bytes -> bit
+
+    # Audio di base 128k, ma riduciamo se necessario
+    audio_kbps = 128
+
+    # video_bps = target_bits_total/duration - audio_bps
+    video_bps = (target_bits_total / duration) - (audio_kbps * 1000)
+    if video_bps < 200_000:  # minima guardia qualità
+        video_bps = 200_000
+        # Se siamo molto stretti, riduci audio
+        if (target_bits_total / duration) < (video_bps + 96_000):
+            audio_kbps = 96
+        if (target_bits_total / duration) < (video_bps + 64_000):
+            audio_kbps = 64
+
+    video_kbps = int(video_bps // 1000)
+    maxrate_kbps = int(video_kbps * 1.15)          # picchi consentiti
+    bufsize_kbps = int(max(video_kbps * 2, 500))   # buffer
+
+    logger.info(
+        "FFmpeg ABR: duration=%.2fs, video=%dk, audio=%dk, maxrate=%dk, bufsize=%dk",
+        duration, video_kbps, audio_kbps, maxrate_kbps, bufsize_kbps
+    )
+
+    cmd = [
+        "ffmpeg", "-y", "-nostdin",
+        "-threads", "1",
+        "-i", input_path,
+        "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-b:v", f"{video_kbps}k",
+        "-maxrate", f"{maxrate_kbps}k",
+        "-bufsize", f"{bufsize_kbps}k",
+        "-c:a", "aac",
+        "-b:a", f"{audio_kbps}k",
+        "-movflags", "+faststart",
+        out_path
+    ]
+    logger.info("FFmpeg: avvio compressione ABR -> %s", out_path)
+
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if proc.returncode != 0:
+            logger.warning("FFmpeg: ritorno %s. stderr: %s",
+                           proc.returncode, proc.stderr.decode(errors="ignore")[-500:])
+            return None
+    except Exception as e:
+        logger.exception("FFmpeg: errore esecuzione: %s", e)
+        return None
+
+    size = file_size(out_path)
+    logger.info("FFmpeg: output ABR -> %s", human_size(size))
+    if size <= max_bytes:
+        return out_path
+
+    # Se siamo leggermente sopra, riprova al volo con un -10% bitrate video
+    if size < int(max_bytes * 1.10):
+        more_kbps = int(video_kbps * 0.9)
+        if more_kbps < 200:
+            more_kbps = 200
+        out_path2 = os.path.join(base_dir, f"{base_name}_abr_tight.mp4")
+        try:
+            if os.path.exists(out_path2):
+                os.remove(out_path2)
+        except Exception:
+            pass
+        cmd2 = [
+            "ffmpeg", "-y", "-nostdin",
+            "-threads", "1",
             "-i", input_path,
             "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", str(crf),
-            "-c:a", "aac",
-            "-b:a", "128k",
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-b:v", f"{more_kbps}k",
+            "-maxrate", f"{int(more_kbps*1.15)}k",
+            "-bufsize", f"{max(int(more_kbps*2),500)}k",
+            "-c:a", "aac", "-b:a", f"{audio_kbps}k",
             "-movflags", "+faststart",
-            out_path
+            out_path2
         ]
-        logger.info("FFmpeg: avvio compressione CRF=%s -> %s", crf, out_path)
+        logger.info("FFmpeg: ritento ABR più stretto -> %s", out_path2)
         try:
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            if proc.returncode != 0:
-                logger.warning("FFmpeg: ritorno %s. stderr: %s", proc.returncode, proc.stderr.decode(errors="ignore")[-500:])
-                continue
-        except FileNotFoundError:
-            logger.warning("ffmpeg non trovato durante l'esecuzione.")
-            return None
+            proc2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if proc2.returncode == 0 and file_size(out_path2) <= max_bytes:
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+                return out_path2
         except Exception as e:
-            logger.exception("FFmpeg: errore esecuzione: %s", e)
-            continue
+            logger.exception("FFmpeg: errore esecuzione ritento ABR: %s", e)
 
-        size = file_size(out_path)
-        logger.info("FFmpeg: dimensione output CRF=%s -> %s", crf, human_size(size))
-        if size <= max_bytes:
-            logger.info("FFmpeg: obiettivo raggiunto (%s <= %s).", human_size(size), human_size(max_bytes))
-            return out_path
-        else:
-            logger.info("FFmpeg: ancora troppo grande (%s > %s), provo CRF successivo…", human_size(size), human_size(max_bytes))
-
-    logger.warning("FFmpeg: impossibile scendere sotto %s dopo tutti i tentativi.", human_size(max_bytes))
+    logger.warning("FFmpeg: impossibile scendere sotto %s con ABR.", human_size(max_bytes))
     return None
 
 
@@ -465,7 +549,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await notify_admin(context, "Download via Pyrogram fallito o non configurato.")
                 return
 
-        # Se il file è >100MB ed è video → tenta compressione
+        # Se il file è >100MB ed è video → tenta compressione ABR
         if is_video and file_size(path) > DISCORD_MAX_BYTES:
             logger.info("Limite Discord: file %s è %s (> 100MB). Avvio compressione.",
                         os.path.basename(path), human_size(file_size(path)))
@@ -481,8 +565,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 warn = (
                     f"⚠️ Il video supera il limite di 100MB di Discord.\n"
                     f"- Originale: {human_size(file_size(path))}\n"
-                    f"- Compressione: {'ffmpeg non disponibile' if not ffmpeg_available() else 'non sufficiente'}\n"
-                    f"Soluzione: carica su un host esterno (Drive/Streamable) o abilita ffmpeg nel container."
+                    f"- Compressione: {'ffmpeg non disponibile/durata non nota' if not ffmpeg_available() else 'non sufficiente'}\n"
+                    f"Soluzione: carica su un host esterno (Drive/Streamable) o aumenta risorse del container."
                 )
                 send_discord_text(webhook_url, (content + "\n\n" + warn).strip())
         else:
@@ -561,9 +645,3 @@ if __name__ == "__main__":
     application = build_application()
     add_handlers(application)
     run_polling(application)
-
-
-
-if __name__ == "__main__":
-    main()
-
