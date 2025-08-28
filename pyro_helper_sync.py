@@ -1,6 +1,11 @@
+# pyro_helper_sync.py
 from typing import Optional
 import os
+import inspect
 from pyrogram import Client
+
+def _run_if_awaitable(app: Client, value):
+    return app.run(value) if inspect.isawaitable(value) else value
 
 def download_media_via_pyro(
     api_id: int,
@@ -11,13 +16,13 @@ def download_media_via_pyro(
     download_dir: Optional[str] = None,
 ) -> str:
     """
-    Scarica media da (chat_id, message_id) usando Pyrogram con session string.
-    Ritorna il path del file scaricato.
+    Scarica media da (chat_id, message_id) usando Pyrogram (session string).
+    Ritorna il path del file scaricato (stringa).
+    Compatibile con Pyrogram v2 (API async sotto, wrapper sync qui).
     """
     if not (api_id and api_hash and session_string):
         raise RuntimeError("Pyrogram non configurato (api_id/api_hash/session_string).")
 
-    # Usa una session in-memory per non creare file sul disco
     app = Client(
         name=":memory:",
         api_id=api_id,
@@ -26,13 +31,16 @@ def download_media_via_pyro(
         no_updates=True,
         workdir=download_dir or os.getcwd(),
     )
-    app.start()
+
+    # start/stop possono essere async: trattali allo stesso modo
+    _run_if_awaitable(app, app.start())
     try:
-        msg = app.get_messages(chat_id, message_id)
-        path = app.download_media(msg, file_name=download_dir)
-        if not path:
-            raise RuntimeError("download_media ha restituito None.")
+        msg = _run_if_awaitable(app, app.get_messages(chat_id, message_id))
+        path = _run_if_awaitable(app, app.download_media(msg, file_name=download_dir))
+        if not path or not isinstance(path, str):
+            raise RuntimeError(f"download_media ha restituito un valore non valido: {type(path)}")
         return path
     finally:
-        app.stop()
+        _run_if_awaitable(app, app.stop())
+
 
