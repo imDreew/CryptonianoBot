@@ -3,7 +3,6 @@ import os
 import io
 import re
 import time
-import math
 import logging
 import tempfile
 import shutil
@@ -48,21 +47,20 @@ TELEGRAM_ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 FORWARD_EDITS = env_bool("FORWARD_EDITS", False)
 INCLUDE_AUTHOR = env_bool("INCLUDE_AUTHOR", False)
 
-# Webhooks Discord
-DISCORD_WEBHOOK_ANALISI_VOLUMETRICA  = os.getenv("DISCORD_WEBHOOK_ANALISI_VOLUMETRICA", "").strip()
-DISCORD_WEBHOOK_FORMAZIONE_VOLUMI  = os.getenv("DISCORD_WEBHOOK_FORMAZIONE_VOLUMI", "").strip()
-DISCORD_WEBHOOK_DEFAULT    = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip()  # opzionale
+# Webhooks Discord (SOLO QUESTI DUE + fallback opzionale)
+DISCORD_WEBHOOK_ANALISI_VOLUMETRICA = os.getenv("DISCORD_WEBHOOK_ANALISI_VOLUMETRICA", "").strip()
+DISCORD_WEBHOOK_FORMAZIONE_VOLUMI   = os.getenv("DISCORD_WEBHOOK_FORMAZIONE_VOLUMI", "").strip()
+DISCORD_WEBHOOK_DEFAULT             = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip()  # opzionale
 
+# Mappa tag -> webhook
 WEBHOOK_MAP = {
     "ANALISI_VOLUMETRICA": DISCORD_WEBHOOK_ANALISI_VOLUMETRICA,
     "FORMAZIONE_VOLUMI": DISCORD_WEBHOOK_FORMAZIONE_VOLUMI,
 }
 
-# Telegram file size limit per download diretto via Bot API
-BOT_API_LIMIT = 20 * 1024 * 1024  # 20MB
-
-# Discord hard limit
-DISCORD_MAX_BYTES = 100 * 1024 * 1024  # 100MB
+# Limiti
+BOT_API_LIMIT = 20 * 1024 * 1024      # 20MB (Bot API)
+DISCORD_MAX_BYTES = 100 * 1024 * 1024 # 100MB (Discord)
 
 # Pyrogram fallback (per file >20MB) — sessione **utente**
 TG_API_ID   = int(os.getenv("TG_API_ID", "0"))
@@ -73,14 +71,8 @@ if not TG_SESSION:
 else:
     logger.info("Pyrogram abilitato (session string presente).")
 
-# Webhook hosting (se userai webhook invece del polling)
-PUBLIC_BASE = os.getenv("PUBLIC_BASE", os.getenv("RAILWAY_STATIC_URL", "")).strip()
-PORT = int(os.getenv("PORT", "8080"))
-
-# Cache canali già “visti” dallo userbot
-PYRO_KNOWN_CHATS: set[int] = set()
-
 # Stato bot (per log)
+PYRO_KNOWN_CHATS: set[int] = set()
 BOT_ID: Optional[int] = None
 BOT_USERNAME: Optional[str] = None
 
@@ -411,7 +403,7 @@ def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES)
 # =========================
 def pick_webhook_from_text(text: str) -> Optional[str]:
     """
-    Cerca #SCALPING / #ALGORITMO / #FORMAZIONE (case-insensitive).
+    Cerca #ANALISI_VOLUMETRICA / #FORMAZIONE_VOLUMI (case-insensitive).
     Fallback su DISCORD_WEBHOOK_DEFAULT se non matcha nulla.
     """
     up = (text or "").upper()
@@ -611,9 +603,10 @@ async def _post_init(app: Application) -> None:
     logger.info("Source chat: %s | Admin notify: %s", TELEGRAM_SOURCE_CHAT_ID, TELEGRAM_ADMIN_CHAT_ID)
     logger.info("Flags: FORWARD_EDITS=%s INCLUDE_AUTHOR=%s", FORWARD_EDITS, INCLUDE_AUTHOR)
     logger.info(
-        "Discord webhooks: SCALPING=%s ALGORITMO=%s FORMAZIONE=%s DEFAULT=%s",
-        bool(DISCORD_WEBHOOK_SCALPING), bool(DISCORD_WEBHOOK_ALGORITMO),
-        bool(DISCORD_WEBHOOK_FORMAZIONE), bool(DISCORD_WEBHOOK_DEFAULT)
+        "Discord webhooks: ANALISI_VOLUMETRICA=%s FORMAZIONE_VOLUMI=%s DEFAULT=%s",
+        bool(DISCORD_WEBHOOK_ANALISI_VOLUMETRICA),
+        bool(DISCORD_WEBHOOK_FORMAZIONE_VOLUMI),
+        bool(DISCORD_WEBHOOK_DEFAULT),
     )
     logger.info("Pyrogram enabled=%s (API_ID set=%s, SESSION set=%s)",
                 bool(TG_SESSION), bool(TG_API_ID and TG_API_HASH), bool(TG_SESSION))
