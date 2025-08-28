@@ -3,7 +3,6 @@ import os
 import io
 import re
 import time
-import math
 import logging
 import tempfile
 import shutil
@@ -54,7 +53,7 @@ INCLUDE_AUTHOR = env_bool("INCLUDE_AUTHOR", False)
 DISCORD_WEBHOOK_SCALPING   = os.getenv("DISCORD_WEBHOOK_SCALPING", "").strip()
 DISCORD_WEBHOOK_ALGORITMO  = os.getenv("DISCORD_WEBHOOK_ALGORITMO", "").strip()
 DISCORD_WEBHOOK_FORMAZIONE = os.getenv("DISCORD_WEBHOOK_FORMAZIONE", "").strip()
-DISCORD_WEBHOOK_DEFAULT    = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip()  # opzionale
+DISCORD_WEBHOOK_DEFAULT    = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip()
 
 WEBHOOK_MAP = {
     "SCALPING": DISCORD_WEBHOOK_SCALPING,
@@ -114,7 +113,7 @@ def db_init():
             PRIMARY KEY (tg_chat_id, tg_message_id)
         )
         """)
-        # migrazioni soft-add per sicurezza (ignora errori se esistono già)
+        # migrazioni soft-add (ignora errore se già esistono)
         try: con.execute("ALTER TABLE map ADD COLUMN discord_channel_id TEXT")
         except Exception: pass
         try: con.execute("ALTER TABLE map ADD COLUMN discord_thread_id TEXT")
@@ -355,6 +354,25 @@ async def _get_autoinvite_for_pyro(context: ContextTypes.DEFAULT_TYPE, chat_id: 
     except Exception as e:
         logger.warning("Autoinvite: NON creato (permessi mancanti o non admin?). Dettagli: %s", e)
         return None
+
+def _http_create_invite_link(chat_id: int) -> Optional[str]:
+    """Crea un link di invito via Bot API (HTTP), usato anche nel reconcile fallback asyncio."""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/createChatInviteLink"
+        r = requests.post(url, json={
+            "chat_id": chat_id,
+            "name": "bridge-autoinvite",
+            "creates_join_request": False,
+            "member_limit": 0
+        }, timeout=30)
+        if r.ok:
+            j = r.json()
+            if j.get("ok") and j.get("result", {}).get("invite_link"):
+                return j["result"]["invite_link"]
+        logger.warning("Autoinvite HTTP: fallito %s %s", r.status_code, r.text[:200])
+    except Exception as e:
+        logger.warning("Autoinvite HTTP: eccezione: %s", e)
+    return None
 
 
 # =========================
@@ -712,14 +730,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Reconciliation job (ogni 10s sugli ultimi 10 msg)
+# Reconciliation job (ogni 10s sugli ultimi 10 msg) con auto-join/warm-up
 # =========================
 async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
+    """Ogni 10s: controlla ultimi 10 mapping; se TG ha cancellato => elimina/“tomba” su Discord; se editato => patcha."""
+    logger.info("Reconcile: tick (chat_id=%s)", TELEGRAM_SOURCE_CHAT_ID)
     if not (TG_API_ID and TG_API_HASH and TG_SESSION):
+        logger.info("Reconcile: Pyrogram non configurato; salto.")
         return
     try:
         recent = db_get_recent_mappings(TELEGRAM_SOURCE_CHAT_ID, limit=10)
         if not recent:
+            logger.info("Reconcile: nessun mapping recente.")
             return
 
         from pyrogram import Client
@@ -733,38 +755,73 @@ async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
             no_updates=True,
             workdir=tempfile.gettempdir(),
         ) as app:
-            try:
-                await app.get_chat(TELEGRAM_SOURCE_CHAT_ID)
-            except Exception:
-                logger.debug("Reconcile: get_chat fallita; salto iterazione.")
+            async def ensure_access() -> bool:
+                # 1) prova get_chat(id)
+                try:
+                    await app.get_chat(TELEGRAM_SOURCE_CHAT_ID)
+                    return True
+                except Exception as e:
+                    logger.info("Reconcile: get_chat(id) fallita: %s", e)
+
+                # 2) prova via invite (env o creato al volo)
+                invite = os.getenv("TG_CHAT_INVITE", "").strip()
+                if not invite:
+                    invite = _http_create_invite_link(TELEGRAM_SOURCE_CHAT_ID)
+                if invite:
+                    try:
+                        logger.info("Reconcile: provo join via invite=%s…", invite[:24] + "…")
+                        await app.join_chat(invite)
+                    except Exception as e:
+                        if "USER_ALREADY_PARTICIPANT" in str(e).upper():
+                            logger.info("Reconcile: già partecipante.")
+                        else:
+                            logger.info("Reconcile: join fallita: %s", e)
+
+                # 3) warm-up dialoghi e riprova
+                try:
+                    async for _ in app.get_dialogs():
+                        pass
+                    await app.get_chat(TELEGRAM_SOURCE_CHAT_ID)
+                    logger.info("Reconcile: accesso OK dopo warm-up.")
+                    return True
+                except Exception as e:
+                    logger.info("Reconcile: accesso KO anche dopo warm-up: %s", e)
+                    return False
+
+            if not await ensure_access():
+                logger.info("Reconcile: impossibile accedere alla chat sorgente; salto tick.")
                 return
 
             for tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id in recent:
+                # Prova leggere il messaggio TG
                 m = None
                 try:
                     m = await app.get_messages(TELEGRAM_SOURCE_CHAT_ID, tg_message_id)
                 except MessageIdInvalid:
                     m = None
                 except RPCError as e:
-                    logger.debug("Reconcile: RPCError per %s: %s", tg_message_id, e)
+                    logger.info("Reconcile: RPCError su %s: %s", tg_message_id, e)
                     m = None
                 except Exception as e:
-                    logger.debug("Reconcile: errore %s su %s", e, tg_message_id)
+                    logger.info("Reconcile: errore su %s: %s", tg_message_id, e)
                     m = None
 
                 if m is None:
+                    # **DELETED** su Telegram -> elimina/tombstone su Discord
+                    logger.info("Reconcile: tg_id=%s risulta cancellato -> delete Discord.", tg_message_id)
                     ok = delete_discord_message(webhook_url, discord_message_id, thread_id=discord_thread_id)
                     if ok:
                         db_mark_deleted(TELEGRAM_SOURCE_CHAT_ID, tg_message_id)
-                        logger.info("Reconcile: cancellato su Discord (tg_id=%s -> dc_id=%s).",
-                                    tg_message_id, discord_message_id)
+                        logger.info("Reconcile: cancellazione sincronizzata (tg_id=%s).", tg_message_id)
                     continue
 
+                # **EXISTS**: controlla edit contenuto
                 plain = (m.caption or m.text or "").strip()
                 new_content = plain[:2000]
                 new_edit_ts = int((getattr(m, "edit_date", None) or getattr(m, "date", None)).timestamp()) if (getattr(m, "edit_date", None) or getattr(m, "date", None)) else tg_edit_ts
 
                 if new_edit_ts > tg_edit_ts or (new_content and new_content != (last_content or "")):
+                    logger.info("Reconcile: tg_id=%s modificato -> edit Discord.", tg_message_id)
                     ok = edit_discord_message(webhook_url, discord_message_id, new_content, thread_id=discord_thread_id)
                     if ok:
                         db_update_edit_ts_and_content(TELEGRAM_SOURCE_CHAT_ID, tg_message_id, new_edit_ts, new_content)
@@ -799,9 +856,10 @@ async def _post_init(app: Application) -> None:
 
     # JobQueue se disponibile, altrimenti loop asyncio
     if getattr(app, "job_queue", None):
+        logger.info("Scheduler: uso JobQueue PTB ogni 10s.")
         app.job_queue.run_repeating(reconcile_last_messages, interval=10, first=10)
     else:
-        logger.warning('JobQueue assente: fallback a loop asyncio ogni 10s.')
+        logger.warning("Scheduler: JobQueue assente -> uso loop asyncio ogni 10s.")
         async def _reconcile_loop():
             while True:
                 try:
@@ -831,5 +889,6 @@ if __name__ == "__main__":
     application = build_application()
     add_handlers(application)
     run_polling(application)
+
 
 
