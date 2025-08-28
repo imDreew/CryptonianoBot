@@ -27,6 +27,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# === CONFIG ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", 8080))
+
+# Railway fornisce già questa variabile
+RAILWAY_STATIC_URL = os.getenv("RAILWAY_STATIC_URL")
+
+# Se PUBLIC_BASE è impostato la usiamo, altrimenti fallback a RAILWAY_STATIC_URL
+PUBLIC_BASE = os.getenv("PUBLIC_BASE", RAILWAY_STATIC_URL)
+
 # =========================
 # Env
 # =========================
