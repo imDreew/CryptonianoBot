@@ -67,10 +67,32 @@ async def download_media_via_pyro_async(
                     raise RuntimeError("Pyro: invite non valido/scaduto.")
                 except RPCError as e:
                     raise RuntimeError(f"Pyro: join fallito: {type(e).__name__}: {e}")
-                # dopo join, riprova get_chat
-                await app.get_chat(chat_id)
-                logger.info("Pyro: get_chat(id) OK dopo join.")
-                return True
+
+                # 2a) prova a risolvere via stringa (invite) per popolare lo storage
+                try:
+                    chat_via_inv = await app.get_chat(inv_link)
+                    logger.info("Pyro: get_chat(invite) OK -> id=%s", getattr(chat_via_inv, "id", None))
+                except Exception as e:
+                    logger.info("Pyro: get_chat(invite) non disponibile: %s", e)
+
+                # 2b) warm-up dialoghi (popola cache peer) e cerca l'id
+                try:
+                    logger.info("Pyro: warm-up dialoghi…")
+                    async for dlg in app.get_dialogs():
+                        if getattr(dlg.chat, "id", None) == chat_id:
+                            logger.info("Pyro: trovato peer nei dialoghi.")
+                            break
+                except Exception as e:
+                    logger.info("Pyro: get_dialogs fallito/skip: %s", e)
+
+                # 2c) retry finale su get_chat(id)
+                try:
+                    await app.get_chat(chat_id)
+                    logger.info("Pyro: get_chat(id) OK dopo join/warm-up.")
+                    return True
+                except (RPCError, ValueError) as e:
+                    logger.info("Pyro: get_chat(id) ancora fallita: %s", e)
+                    return False
 
             logger.info("Pyro: nessun invite disponibile in questo tentativo.")
             return False
