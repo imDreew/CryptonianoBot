@@ -27,7 +27,7 @@ async def download_media_via_pyro_async(
     chat_id: int,
     message_id: int,
     download_dir: Optional[str] = None,
-    invite_link: Optional[str] = None,   # <— PASSATO DA bridge
+    invite_link: Optional[str] = None,   # passato da bridge
 ) -> str:
     if not (api_id and api_hash and session_string):
         raise RuntimeError("Pyrogram non configurato (api_id/api_hash/session_string).")
@@ -48,7 +48,7 @@ async def download_media_via_pyro_async(
                 await app.get_chat(chat_id)
                 logger.info("Pyro: get_chat(id) OK (già membro/visibile).")
                 return True
-            except RPCError as e:
+            except (RPCError, ValueError) as e:
                 logger.info("Pyro: get_chat(id) fallita: %s", e)
 
             # 2) se ho un invito, provo JOIN
