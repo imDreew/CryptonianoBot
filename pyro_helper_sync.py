@@ -1,34 +1,38 @@
+from typing import Optional
 import os
-import asyncio
-import logging
 from pyrogram import Client
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("PyroHelper")
-
-# Config
-api_id = int(os.getenv("TG_API_ID"))
-api_hash = os.getenv("TG_API_HASH")
-session_name = os.getenv("TG_SESSION", "bridge")
-
-# Client globale
-pyro = Client(session_name, api_id=api_id, api_hash=api_hash)
-
-async def _download_media_async(message_link: str, dest: str = "downloads/") -> str:
+def download_media_via_pyro(
+    api_id: int,
+    api_hash: str,
+    session_string: str,
+    chat_id: int,
+    message_id: int,
+    download_dir: Optional[str] = None,
+) -> str:
     """
-    Scarica un media da un link pubblico/privato di Telegram (message_link).
+    Scarica media da (chat_id, message_id) usando Pyrogram con session string.
+    Ritorna il path del file scaricato.
     """
-    await pyro.start()
+    if not (api_id and api_hash and session_string):
+        raise RuntimeError("Pyrogram non configurato (api_id/api_hash/session_string).")
+
+    # Usa una session in-memory per non creare file sul disco
+    app = Client(
+        name=":memory:",
+        api_id=api_id,
+        api_hash=api_hash,
+        session_string=session_string,
+        no_updates=True,
+        workdir=download_dir or os.getcwd(),
+    )
+    app.start()
     try:
-        chat_id, msg_id = message_link.split("/")[-2], int(message_link.split("/")[-1])
-        msg = await pyro.get_messages(int(chat_id), msg_id)
-        file_path = await pyro.download_media(msg, file_name=dest)
-        return file_path
+        msg = app.get_messages(chat_id, message_id)
+        path = app.download_media(msg, file_name=download_dir)
+        if not path:
+            raise RuntimeError("download_media ha restituito None.")
+        return path
     finally:
-        await pyro.stop()
+        app.stop()
 
-def download_media(message_link: str, dest: str = "downloads/") -> str:
-    """
-    Wrapper sincrono: scarica un media da Telegram e restituisce il percorso locale.
-    """
-    return asyncio.run(_download_media_async(message_link, dest))
