@@ -21,23 +21,17 @@ from telegram.ext import (
     MessageHandler, filters, CommandHandler
 )
 
-# =========================
-# Logging
-# =========================
+# ========= Logging =========
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
 )
 logger = logging.getLogger("bridge")
 
-
-# =========================
-# Env / Config
-# =========================
+# ========= Env / Config =========
 def env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name, str(default)).strip().lower()
     return v in ("1", "true", "yes", "on")
-
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
@@ -49,7 +43,6 @@ TELEGRAM_ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 FORWARD_EDITS = env_bool("FORWARD_EDITS", False)
 INCLUDE_AUTHOR = env_bool("INCLUDE_AUTHOR", False)
 
-# Webhooks Discord
 DISCORD_WEBHOOK_SCALPING   = os.getenv("DISCORD_WEBHOOK_SCALPING", "").strip()
 DISCORD_WEBHOOK_ALGORITMO  = os.getenv("DISCORD_WEBHOOK_ALGORITMO", "").strip()
 DISCORD_WEBHOOK_FORMAZIONE = os.getenv("DISCORD_WEBHOOK_FORMAZIONE", "").strip()
@@ -61,41 +54,36 @@ WEBHOOK_MAP = {
     "FORMAZIONE": DISCORD_WEBHOOK_FORMAZIONE,
 }
 
-# Telegram file size limit per download diretto via Bot API
 BOT_API_LIMIT = 20 * 1024 * 1024  # 20MB
-
-# Discord hard limit
 DISCORD_MAX_BYTES = 100 * 1024 * 1024  # 100MB
 
-# Pyrogram fallback (per file >20MB) — sessione **utente**
+# Pyrogram (user session)
 TG_API_ID   = int(os.getenv("TG_API_ID", "0"))
 TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
 TG_SESSION  = os.getenv("PYRO_SESSION", os.getenv("TG_SESSION", "")).strip()
-if not TG_SESSION:
-    logger.info("TG_SESSION/PYRO_SESSION non impostato: il fallback Pyrogram per >20MB non sarà disponibile.")
-else:
+TG_CHAT_INVITE = os.getenv("TG_CHAT_INVITE", "").strip()  # opzionale, se vuoi fissarlo
+if TG_SESSION:
     logger.info("Pyrogram abilitato (session string presente).")
+else:
+    logger.info("Pyrogram non configurato: niente eventi realtime cancellazione, niente download >20MB.")
 
-# Webhook hosting (se userai webhook invece del polling)
 PUBLIC_BASE = os.getenv("PUBLIC_BASE", os.getenv("RAILWAY_STATIC_URL", "")).strip()
 PORT = int(os.getenv("PORT", "8080"))
 
-# Cache canali “visti” dallo userbot
+# Cache
 PYRO_KNOWN_CHATS: set[int] = set()
+JOIN_BACKOFF: dict[int, float] = {}  # chat_id -> epoch quando poter ritentare il join
 
-# Stato bot (per log)
+# Stato bot
 BOT_ID: Optional[int] = None
 BOT_USERNAME: Optional[str] = None
 
-# Mapping store (SQLite)
+# DB mapping
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "map.sqlite")
 
-
-# =========================
-# SQLite mapping Telegram ↔ Discord (con thread_id)
-# =========================
+# ========= DB: Telegram↔Discord =========
 def db_init():
     con = sqlite3.connect(DB_PATH)
     try:
@@ -113,7 +101,6 @@ def db_init():
             PRIMARY KEY (tg_chat_id, tg_message_id)
         )
         """)
-        # migrazioni soft-add (ignora errore se già esistono)
         try: con.execute("ALTER TABLE map ADD COLUMN discord_channel_id TEXT")
         except Exception: pass
         try: con.execute("ALTER TABLE map ADD COLUMN discord_thread_id TEXT")
@@ -160,11 +147,7 @@ def db_update_edit_ts_and_content(tg_chat_id: int, tg_message_id: int, edit_ts: 
     finally:
         con.close()
 
-def db_get_recent_mappings(tg_chat_id: int, limit: int = 10) -> List[Tuple[int, str, str, int, str, Optional[str]]]:
-    """
-    Ritorna (tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id)
-    ultimi N messaggi non cancellati.
-    """
+def db_get_recent_mappings(tg_chat_id: int, limit: int = 10):
     con = sqlite3.connect(DB_PATH)
     try:
         cur = con.execute("""
@@ -178,10 +161,19 @@ def db_get_recent_mappings(tg_chat_id: int, limit: int = 10) -> List[Tuple[int, 
     finally:
         con.close()
 
+def db_get_mapping(tg_chat_id: int, tg_message_id: int):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        cur = con.execute("""
+          SELECT tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id
+          FROM map
+          WHERE tg_chat_id=? AND tg_message_id=? AND deleted=0
+        """, (tg_chat_id, tg_message_id))
+        return cur.fetchone()
+    finally:
+        con.close()
 
-# =========================
-# Util vari
-# =========================
+# ========= Utils =========
 def file_size(path: str) -> int:
     try:
         return os.path.getsize(path)
@@ -196,10 +188,7 @@ def human_size(n: int) -> str:
         x /= 1024
     return f"{x:.1f}B"
 
-
-# =========================
-# HTML Telegram -> Markdown Discord
-# =========================
+# ========= HTML TG -> Markdown Discord =========
 def tg_html_to_discord_md(html: str) -> str:
     if not html:
         return ""
@@ -223,10 +212,7 @@ def tg_html_to_discord_md(html: str) -> str:
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     return s
 
-
-# =========================
-# Discord helpers (con wait=true e thread_id)
-# =========================
+# ========= Discord helpers =========
 def _ensure_wait(url: str) -> str:
     return url + ("&wait=true" if "?" in url else "?wait=true")
 
@@ -260,8 +246,7 @@ def _delete_with_retry(url: str, **kwargs) -> Response:
         time.sleep(wait)
     return r
 
-def send_discord_text(webhook_url: str, content: str) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
-    """Ritorna (ok, message_id, channel_id, thread_id?)"""
+def send_discord_text(webhook_url: str, content: str):
     if not webhook_url:
         logger.info("Discord: nessun webhook configurato, salto invio testo.")
         return False, None, None, None
@@ -273,7 +258,7 @@ def send_discord_text(webhook_url: str, content: str) -> Tuple[bool, Optional[st
             j = r.json()
             msg_id = j.get("id")
             ch_id = j.get("channel_id")
-            th_id = ch_id  # se è thread, channel_id del messaggio è il thread id
+            th_id = ch_id
             ok = True
         except Exception:
             ok = True
@@ -281,7 +266,7 @@ def send_discord_text(webhook_url: str, content: str) -> Tuple[bool, Optional[st
                "Discord: risposta invio testo -> %s (%s)", r.status_code, r.text[:200])
     return ok, msg_id, ch_id, th_id
 
-def send_discord_file_bytes(webhook_url: str, file_bytes: bytes, filename: str, content: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+def send_discord_file_bytes(webhook_url: str, file_bytes: bytes, filename: str, content: Optional[str] = None):
     if not webhook_url:
         logger.info("Discord: nessun webhook configurato, salto invio file.")
         return False, None, None, None
@@ -304,7 +289,7 @@ def send_discord_file_bytes(webhook_url: str, file_bytes: bytes, filename: str, 
                "Discord: risposta upload file -> %s (%s)", r.status_code, r.text[:200])
     return ok, msg_id, ch_id, th_id
 
-def send_discord_file_path(webhook_url: str, path: str, content: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+def send_discord_file_path(webhook_url: str, path: str, content: Optional[str] = None):
     with open(path, "rb") as fh:
         data = fh.read()
     name = os.path.basename(path)
@@ -332,57 +317,39 @@ def delete_discord_message(webhook_url: str, message_id: str, thread_id: Optiona
         logger.info("Discord: delete -> %s", r.status_code)
         return True
     logger.warning("Discord: delete fallito (%s). Fallback tombstone.", r.status_code)
-    # fallback: edit a "eliminato"
     return edit_discord_message(webhook_url, message_id, "*(eliminato su Telegram)*", thread_id=thread_id)
 
-
-# =========================
-# Bot-side: crea autoinvite (per Pyrogram)
-# =========================
+# ========= Bot-side: autoinvite =========
 async def _get_autoinvite_for_pyro(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Optional[str]:
-    logger.info("Autoinvite: provo a creare un link di invito via Bot API per chat_id=%s", chat_id)
     try:
         link = await context.bot.create_chat_invite_link(
-            chat_id=chat_id,
-            name="bridge-autoinvite",
-            creates_join_request=False,
-            expire_date=None,
-            member_limit=0,
+            chat_id=chat_id, name="bridge-autoinvite",
+            creates_join_request=False, expire_date=None, member_limit=0
         )
-        logger.info("Autoinvite: creato con successo.")
+        logger.info("Autoinvite: creato via Bot API.")
         return link.invite_link
     except Exception as e:
-        logger.warning("Autoinvite: NON creato (permessi mancanti o non admin?). Dettagli: %s", e)
+        logger.warning("Autoinvite: NON creato (permessi mancanti?). %s", e)
         return None
 
 def _http_create_invite_link(chat_id: int) -> Optional[str]:
-    """Crea un link di invito via Bot API (HTTP), usato anche nel reconcile fallback asyncio."""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/createChatInviteLink"
         r = requests.post(url, json={
-            "chat_id": chat_id,
-            "name": "bridge-autoinvite",
-            "creates_join_request": False,
-            "member_limit": 0
+            "chat_id": chat_id, "name": "bridge-autoinvite",
+            "creates_join_request": False, "member_limit": 0
         }, timeout=30)
-        if r.ok:
-            j = r.json()
-            if j.get("ok") and j.get("result", {}).get("invite_link"):
-                return j["result"]["invite_link"]
+        if r.ok and r.json().get("ok"):
+            return r.json()["result"]["invite_link"]
         logger.warning("Autoinvite HTTP: fallito %s %s", r.status_code, r.text[:200])
     except Exception as e:
         logger.warning("Autoinvite HTTP: eccezione: %s", e)
     return None
 
-
-# =========================
-# Pyrogram fallback (async download via helper)
-# =========================
-async def pyro_download_by_ids(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int
-) -> Optional[str]:
+# ========= Pyrogram helpers =========
+async def pyro_download_by_ids(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int) -> Optional[str]:
     if not (TG_API_ID and TG_API_HASH and TG_SESSION):
-        logger.error("Pyrogram: configurazione mancante (TG_API_ID/API_HASH/SESSION).")
+        logger.error("Pyrogram: configurazione mancante.")
         return None
     try:
         from pyro_helper_sync import download_media_via_pyro_async
@@ -392,21 +359,15 @@ async def pyro_download_by_ids(
 
     invite_link = None
     if chat_id not in PYRO_KNOWN_CHATS:
-        logger.info("Pyrogram: canale %s non in cache, genero autoinvite via Bot API…", chat_id)
-        invite_link = await _get_autoinvite_for_pyro(context, chat_id)
-        masked = (invite_link[:20] + "…") if invite_link else "None"
-        logger.info("Pyrogram: invite_link=%s", masked)
+        invite_link = TG_CHAT_INVITE or await _get_autoinvite_for_pyro(context, chat_id)
+        logger.info("Pyrogram: invite_link=%s", (invite_link[:24] + "…") if invite_link else "None")
 
     logger.info("Pyrogram: avvio download (chat_id=%s, message_id=%s)", chat_id, message_id)
     try:
         path = await download_media_via_pyro_async(
-            api_id=TG_API_ID,
-            api_hash=TG_API_HASH,
-            session_string=TG_SESSION,
-            chat_id=chat_id,
-            message_id=message_id,
-            download_dir=tempfile.gettempdir(),
-            invite_link=invite_link,
+            api_id=TG_API_ID, api_hash=TG_API_HASH, session_string=TG_SESSION,
+            chat_id=chat_id, message_id=message_id,
+            download_dir=tempfile.gettempdir(), invite_link=invite_link
         )
         PYRO_KNOWN_CHATS.add(chat_id)
         logger.info("Pyrogram: download completato. Path: %s", path)
@@ -415,10 +376,7 @@ async def pyro_download_by_ids(
         logger.exception("Pyrogram: errore nel download: %s", e)
         return None
 
-
-# =========================
-# FFmpeg / Compressione ABR (con fallback anti-OOM)
-# =========================
+# ========= FFmpeg =========
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
@@ -430,41 +388,27 @@ def probe_duration_seconds(input_path: str) -> Optional[float]:
     if not ffmpeg_available():
         return None
     try:
-        cmd = [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            input_path
-        ]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=30)
+        out = subprocess.check_output(
+            ["ffprobe","-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1",input_path],
+            stderr=subprocess.STDOUT, timeout=30
+        )
         return float(out.decode().strip())
     except Exception as e:
-        logger.warning("FFprobe: impossibile leggere durata: %s", e)
+        logger.warning("FFprobe: durata non disponibile: %s", e)
         return None
 
 def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES) -> Optional[str]:
-    """
-    Transcodifica a bitrate calcolato (ABR) con fallback progressivi per evitare OOM/SIGKILL.
-    Step:
-      A) 1080p, audio 128k
-      B) 720p,  audio 96k,  -15% bitrate video
-      C) 540p,  audio 64k,  -25% bitrate video, preset ultrafast
-    Ritorna path file compresso <= max_bytes, altrimenti None.
-    """
     if not ffmpeg_available():
-        logger.warning("ffmpeg non disponibile nel sistema: impossibile comprimere.")
+        logger.warning("ffmpeg non disponibile.")
         return None
-
     duration = probe_duration_seconds(input_path)
     if not duration or duration <= 0:
-        logger.warning("FFmpeg: durata non disponibile; salto compressione ABR.")
         return None
 
     base_dir = os.path.dirname(input_path) or tempfile.gettempdir()
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-
     safety = 0.95
-    target_bits_total = max_bytes * 8 * safety  # bytes -> bit
+    target_bits_total = max_bytes * 8 * safety
     base_audio_kbps = 128
     base_video_bps = (target_bits_total / duration) - (base_audio_kbps * 1000)
     if base_video_bps < 200_000:
@@ -481,67 +425,42 @@ def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES)
         ("_abr540",   540, 0.75, 64, "ultrafast"),
     ]
 
-    def run_once(suffix: str, max_h: int, v_factor: float, a_kbps: int, preset: str) -> Optional[str]:
+    def run_once(suffix, max_h, v_factor, a_kbps, preset):
         v_kbps = max(200, int(base_video_kbps * v_factor))
         maxrate_kbps = int(v_kbps * 1.10)
         bufsize_kbps = max(int(v_kbps * 1.5), 300)
-
         out_path = os.path.join(base_dir, f"{base_name}{suffix}.mp4")
         try:
-            if os.path.exists(out_path):
-                os.remove(out_path)
+            if os.path.exists(out_path): os.remove(out_path)
         except Exception:
             pass
-
-        logger.info(
-            "FFmpeg ABR try %s: height<=%d, video=%dk, audio=%dk, preset=%s",
-            suffix, max_h, v_kbps, a_kbps, preset
-        )
-
         cmd = [
-            "ffmpeg", "-y", "-nostdin",
-            "-threads", "1",
-            "-filter_threads", "1",
+            "ffmpeg","-y","-nostdin","-threads","1","-filter_threads","1",
             "-i", input_path,
             "-vf", f"scale='min(1920,iw)':'min({max_h},ih)':force_original_aspect_ratio=decrease",
-            "-c:v", "libx264",
-            "-preset", preset,
-            "-b:v", f"{v_kbps}k",
-            "-maxrate", f"{maxrate_kbps}k",
-            "-bufsize", f"{bufsize_kbps}k",
-            "-c:a", "aac",
-            "-b:a", f"{a_kbps}k",
-            "-movflags", "+faststart",
-            "-max_muxing_queue_size", "1024",
+            "-c:v","libx264","-preset",preset,
+            "-b:v",f"{v_kbps}k","-maxrate",f"{maxrate_kbps}k","-bufsize",f"{bufsize_kbps}k",
+            "-c:a","aac","-b:a",f"{a_kbps}k",
+            "-movflags","+faststart","-max_muxing_queue_size","1024",
             out_path
         ]
-
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if proc.returncode != 0:
-                tail = proc.stderr.decode(errors="ignore")[-500:]
-                logger.warning("FFmpeg: ritorno %s. stderr: %s", proc.returncode, tail)
+                logger.warning("FFmpeg: ritorno %s.", proc.returncode)
                 return None
         except Exception as e:
-            logger.exception("FFmpeg: errore esecuzione (%s): %s", suffix, e)
+            logger.exception("FFmpeg: errore: %s", e)
             return None
+        return out_path if file_size(out_path) <= max_bytes else None
 
-        sz = file_size(out_path)
-        logger.info("FFmpeg: output %s -> %s", suffix, human_size(sz))
-        return out_path if sz <= max_bytes else None
-
-    for suf, mh, vf, ak, pre in attempts:
-        result = run_once(suf, mh, vf, ak, pre)
-        if result:
-            return result
-
-    logger.warning("FFmpeg: impossibile scendere sotto %s dopo i fallback.", human_size(max_bytes))
+    for args in attempts:
+        res = run_once(*args)
+        if res: return res
+    logger.warning("FFmpeg: impossibile scendere sotto %s.", human_size(max_bytes))
     return None
 
-
-# =========================
-# Routing & helpers
-# =========================
+# ========= Routing & helpers =========
 def pick_webhook_from_text(text: str) -> Optional[str]:
     up = (text or "").upper()
     chosen = None
@@ -552,7 +471,7 @@ def pick_webhook_from_text(text: str) -> Optional[str]:
             break
     if not chosen:
         chosen = DISCORD_WEBHOOK_DEFAULT or None
-        logger.info("Routing: nessun tag trovato -> uso webhook di default presente=%s", bool(chosen))
+        logger.info("Routing: nessun tag trovato -> default=%s", bool(chosen))
     return chosen
 
 def author_suffix(msg: Message) -> str:
@@ -563,36 +482,28 @@ def author_suffix(msg: Message) -> str:
     name = u.full_name or handle or str(u.id)
     return f"\n\n— {name} {handle}".strip()
 
-async def notify_admin(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, text: str):
     if TELEGRAM_ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(TELEGRAM_ADMIN_CHAT_ID, text[:4000])
         except Exception:
             logger.exception("notify_admin fallito")
 
-
-# =========================
-# Handlers
-# =========================
+# ========= Handlers PTB =========
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg: Message = update.effective_message
     if not msg:
         return
-    logger.info("MSG: ricevuto update message_id=%s chat_id=%s", msg.message_id, msg.chat_id)
-
     if msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
-        logger.info("MSG: chat non monitorata (%s != %s). Ignoro.", msg.chat_id, TELEGRAM_SOURCE_CHAT_ID)
         return
+
+    logger.info("MSG: message_id=%s chat_id=%s", msg.message_id, msg.chat_id)
 
     text_html = msg.caption_html or msg.text_html or ""
     text_md = tg_html_to_discord_md(text_html)
-    logger.debug("MSG: testo convertito (len=%d).", len(text_md or ""))
-
     webhook_url = pick_webhook_from_text(text_md or "")
-    content = (text_md or "").strip()
-    content += author_suffix(msg)
+    content = (text_md or "").strip() + author_suffix(msg)
 
-    # media?
     has_media = any([msg.photo, msg.video, msg.document, msg.animation, msg.voice, msg.audio, msg.sticker])
 
     discord_id = None
@@ -602,59 +513,48 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     comp_path = None
     try:
         if not has_media:
-            logger.info("MSG: solo testo. Invio verso Discord.")
             ok, discord_id, discord_ch, discord_thread = send_discord_text(webhook_url, content)
-            if not ok:
-                await notify_admin(context, "Errore invio testo a Discord.")
+            if not ok: await notify_admin(context, "Errore invio testo a Discord.")
         else:
             telegram_file_id = None
             file_name = "file.bin"
-            file_size_tg = 0
+            size_tg = 0
             is_video = False
 
             if msg.photo:
-                photo = msg.photo[-1]
-                telegram_file_id = photo.file_id
+                p = msg.photo[-1]
+                telegram_file_id = p.file_id
                 file_name = "image.jpg"
-                file_size_tg = photo.file_size or 0
-                logger.info("MSG: media=photo size=%s", file_size_tg)
+                size_tg = p.file_size or 0
             elif msg.video:
                 telegram_file_id = msg.video.file_id
                 file_name = msg.video.file_name or "video.mp4"
-                file_size_tg = msg.video.file_size or 0
+                size_tg = msg.video.file_size or 0
                 is_video = True
-                logger.info("MSG: media=video name=%s size=%s", file_name, file_size_tg)
             elif msg.document:
                 telegram_file_id = msg.document.file_id
                 file_name = msg.document.file_name or "document.bin"
-                file_size_tg = msg.document.file_size or 0
+                size_tg = msg.document.file_size or 0
                 is_video = is_video_filename(file_name)
-                logger.info("MSG: media=document name=%s size=%s", file_name, file_size_tg)
             elif msg.animation:
                 telegram_file_id = msg.animation.file_id
                 file_name = msg.animation.file_name or "animation.mp4"
-                file_size_tg = msg.animation.file_size or 0
+                size_tg = msg.animation.file_size or 0
                 is_video = True
-                logger.info("MSG: media=animation name=%s size=%s", file_name, file_size_tg)
             elif msg.audio:
                 telegram_file_id = msg.audio.file_id
                 file_name = msg.audio.file_name or "audio.mp3"
-                file_size_tg = msg.audio.file_size or 0
-                logger.info("MSG: media=audio name=%s size=%s", file_name, file_size_tg)
+                size_tg = msg.audio.file_size or 0
             elif msg.voice:
                 telegram_file_id = msg.voice.file_id
                 file_name = "voice.ogg"
-                file_size_tg = msg.voice.file_size or 0
-                logger.info("MSG: media=voice size=%s", file_size_tg)
+                size_tg = msg.voice.file_size or 0
             elif msg.sticker:
                 telegram_file_id = msg.sticker.file_id
                 file_name = "sticker.webp"
-                file_size_tg = msg.sticker.file_size or 0
-                logger.info("MSG: media=sticker size=%s", file_size_tg)
+                size_tg = msg.sticker.file_size or 0
 
-            # <20MB → Bot API
-            if file_size_tg and file_size_tg < BOT_API_LIMIT:
-                logger.info("FLOW: uso Bot API (file < 20MB).")
+            if size_tg and size_tg < BOT_API_LIMIT:
                 f = await context.bot.get_file(telegram_file_id)
                 resp = requests.get(f.file_path, timeout=600)
                 resp.raise_for_status()
@@ -662,49 +562,39 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     fh.write(resp.content)
                     path = fh.name
             else:
-                logger.info("FLOW: uso Pyrogram (file >= 20MB o size ignota).")
                 path = await pyro_download_by_ids(context, msg.chat_id, msg.message_id)
                 if not path:
-                    logger.error("Pyrogram: path None, download fallito.")
                     await notify_admin(context, "Download via Pyrogram fallito o non configurato.")
                     return
 
-            # compressione se necessario
             if is_video and file_size(path) > DISCORD_MAX_BYTES:
-                logger.info("Limite Discord: file %s è %s (> 100MB). Avvio compressione.",
-                            os.path.basename(path), human_size(file_size(path)))
                 comp_path = compress_video_to_limit(path, DISCORD_MAX_BYTES)
-
                 if comp_path and file_size(comp_path) <= DISCORD_MAX_BYTES:
-                    logger.info("Compressione OK: %s", human_size(file_size(comp_path)))
                     ok, discord_id, discord_ch, discord_thread = send_discord_file_path(webhook_url, comp_path, content if content.strip() else None)
-                    if not ok:
-                        await notify_admin(context, "Errore invio file compresso a Discord.")
+                    if not ok: await notify_admin(context, "Errore invio file compresso a Discord.")
                 else:
                     warn = (
-                        f"⚠️ Il video supera il limite di 100MB di Discord.\n"
+                        f"⚠️ Video oltre 100MB.\n"
                         f"- Originale: {human_size(file_size(path))}\n"
-                        f"- Compressione: {'ffmpeg non disponibile/durata non nota' if not ffmpeg_available() else 'non sufficiente'}\n"
-                        f"Soluzione: carica su un host esterno (Drive/Streamable) o aumenta risorse del container."
+                        f"- Compressione: non disponibile/insufficiente\n"
+                        f"Carica su host esterno oppure aumenta risorse."
                     )
                     ok, discord_id, discord_ch, discord_thread = send_discord_text(webhook_url, (content + "\n\n" + warn).strip())
             else:
                 ok, discord_id, discord_ch, discord_thread = send_discord_file_path(webhook_url, path, content if content.strip() else None)
-                if not ok:
-                    await notify_admin(context, "Errore invio file a Discord.")
+                if not ok: await notify_admin(context, "Errore invio file a Discord.")
     except Exception:
-        logger.exception("FLOW: errore generale gestione media.")
+        logger.exception("Gestione media fallita.")
         await notify_admin(context, "Errore generale gestione media")
     finally:
         for p in (comp_path, path):
             try:
                 if p and os.path.exists(p) and os.path.isfile(p):
                     os.remove(p)
-                    logger.info("Cleanup: file temporaneo rimosso -> %s", p)
+                    logger.info("Cleanup: %s rimosso", p)
             except Exception:
-                logger.debug("Cleanup: rimozione file temp fallita", exc_info=True)
+                pass
 
-    # salva mapping per edit/delete
     try:
         if discord_id:
             edit_ts = int((msg.edit_date or msg.date).timestamp()) if (msg.edit_date or msg.date) else int(time.time())
@@ -715,125 +605,184 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 discord_ch, discord_thread
             )
     except Exception:
-        logger.exception("Mapping: upsert fallito.")
-
+        logger.exception("Mapping upsert fallito.")
 
 async def on_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not FORWARD_EDITS:
         return
-    logger.info("EDIT: messaggio editato, reinoltro come nuovo.")
     await on_message(update, context)
 
-
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot attivo. Inoltro da chat sorgente verso Discord.")
+    await update.message.reply_text("Bot attivo. Inoltro messaggi e sync cancellazioni in tempo reale.")
 
-
-# =========================
-# Reconciliation job (ogni 10s sugli ultimi 10 msg) con auto-join/warm-up
-# =========================
+# ========= Reconcile (solo EDIT come default; delete è realtime) =========
 async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
-    """Ogni 10s: controlla ultimi 10 mapping; se TG ha cancellato => elimina/“tomba” su Discord; se editato => patcha."""
-    logger.info("Reconcile: tick (chat_id=%s)", TELEGRAM_SOURCE_CHAT_ID)
+    logger.info("Reconcile(Edit): tick")
     if not (TG_API_ID and TG_API_HASH and TG_SESSION):
-        logger.info("Reconcile: Pyrogram non configurato; salto.")
         return
     try:
         recent = db_get_recent_mappings(TELEGRAM_SOURCE_CHAT_ID, limit=10)
         if not recent:
-            logger.info("Reconcile: nessun mapping recente.")
             return
-
         from pyrogram import Client
         from pyrogram.errors import RPCError, MessageIdInvalid
-
         async with Client(
-            name=":memory:",
-            api_id=TG_API_ID,
-            api_hash=TG_API_HASH,
-            session_string=TG_SESSION,
-            no_updates=True,
-            workdir=tempfile.gettempdir(),
+            name=":memory:", api_id=TG_API_ID, api_hash=TG_API_HASH,
+            session_string=TG_SESSION, no_updates=True, workdir=tempfile.gettempdir()
         ) as app:
-            async def ensure_access() -> bool:
-                # 1) prova get_chat(id)
-                try:
-                    await app.get_chat(TELEGRAM_SOURCE_CHAT_ID)
-                    return True
-                except Exception as e:
-                    logger.info("Reconcile: get_chat(id) fallita: %s", e)
-
-                # 2) prova via invite (env o creato al volo)
-                invite = os.getenv("TG_CHAT_INVITE", "").strip()
-                if not invite:
-                    invite = _http_create_invite_link(TELEGRAM_SOURCE_CHAT_ID)
-                if invite:
-                    try:
-                        logger.info("Reconcile: provo join via invite=%s…", invite[:24] + "…")
-                        await app.join_chat(invite)
-                    except Exception as e:
-                        if "USER_ALREADY_PARTICIPANT" in str(e).upper():
-                            logger.info("Reconcile: già partecipante.")
-                        else:
-                            logger.info("Reconcile: join fallita: %s", e)
-
-                # 3) warm-up dialoghi e riprova
-                try:
-                    async for _ in app.get_dialogs():
-                        pass
-                    await app.get_chat(TELEGRAM_SOURCE_CHAT_ID)
-                    logger.info("Reconcile: accesso OK dopo warm-up.")
-                    return True
-                except Exception as e:
-                    logger.info("Reconcile: accesso KO anche dopo warm-up: %s", e)
-                    return False
-
-            if not await ensure_access():
-                logger.info("Reconcile: impossibile accedere alla chat sorgente; salto tick.")
+            # niente join qui: delete è realtime, qui ci interessa solo chi riusciamo a leggere
+            try:
+                await app.get_chat(TELEGRAM_SOURCE_CHAT_ID)
+            except Exception:
+                # se non riesce, saltiamo il tick (evitiamo flood)
+                logger.info("Reconcile(Edit): get_chat fallita, salto tick.")
                 return
 
-            for tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id in recent:
-                # Prova leggere il messaggio TG
+            for tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, thread_id in recent:
                 m = None
                 try:
                     m = await app.get_messages(TELEGRAM_SOURCE_CHAT_ID, tg_message_id)
-                except MessageIdInvalid:
+                except (MessageIdInvalid, RPCError):
                     m = None
-                except RPCError as e:
-                    logger.info("Reconcile: RPCError su %s: %s", tg_message_id, e)
+                except Exception:
                     m = None
-                except Exception as e:
-                    logger.info("Reconcile: errore su %s: %s", tg_message_id, e)
-                    m = None
-
-                if m is None:
-                    # **DELETED** su Telegram -> elimina/tombstone su Discord
-                    logger.info("Reconcile: tg_id=%s risulta cancellato -> delete Discord.", tg_message_id)
-                    ok = delete_discord_message(webhook_url, discord_message_id, thread_id=discord_thread_id)
-                    if ok:
-                        db_mark_deleted(TELEGRAM_SOURCE_CHAT_ID, tg_message_id)
-                        logger.info("Reconcile: cancellazione sincronizzata (tg_id=%s).", tg_message_id)
+                if not m:
+                    # delete realtime gestisce già, ma nel dubbio fai tombstone
+                    logger.debug("Reconcile(Edit): msg %s non leggibile (prob. cancellato).", tg_message_id)
                     continue
-
-                # **EXISTS**: controlla edit contenuto
                 plain = (m.caption or m.text or "").strip()
                 new_content = plain[:2000]
                 new_edit_ts = int((getattr(m, "edit_date", None) or getattr(m, "date", None)).timestamp()) if (getattr(m, "edit_date", None) or getattr(m, "date", None)) else tg_edit_ts
-
                 if new_edit_ts > tg_edit_ts or (new_content and new_content != (last_content or "")):
-                    logger.info("Reconcile: tg_id=%s modificato -> edit Discord.", tg_message_id)
-                    ok = edit_discord_message(webhook_url, discord_message_id, new_content, thread_id=discord_thread_id)
+                    ok = edit_discord_message(webhook_url, discord_message_id, new_content, thread_id=thread_id)
                     if ok:
                         db_update_edit_ts_and_content(TELEGRAM_SOURCE_CHAT_ID, tg_message_id, new_edit_ts, new_content)
-                        logger.info("Reconcile: edit sincronizzato (tg_id=%s).", tg_message_id)
-
+                        logger.info("Reconcile(Edit): sync edit tg_id=%s", tg_message_id)
     except Exception:
-        logger.exception("Reconcile: errore nel job.")
+        logger.exception("Reconcile(Edit): errore")
 
+# ========= Pyrogram client persistente (Delete realtime) =========
+pyro_client = None  # sarà istanziato in _post_init
 
-# =========================
-# Startup & wiring (polling con fallback JobQueue)
-# =========================
+async def _pyro_ensure_access_once() -> None:
+    """
+    All'avvio: prova a 'vedere' la chat. Se serve e consentito, fai join UNA VOLTA con backoff FloodWait.
+    """
+    if not (TG_API_ID and TG_API_HASH and TG_SESSION):
+        return
+    from pyrogram.errors import FloodWait
+    # 1) warm-up dialoghi
+    try:
+        found = False
+        async for d in pyro_client.get_dialogs():
+            try:
+                if getattr(d.chat, "id", None) == TELEGRAM_SOURCE_CHAT_ID:
+                    found = True
+                    break
+            except Exception:
+                continue
+        if found:
+            PYRO_KNOWN_CHATS.add(TELEGRAM_SOURCE_CHAT_ID)
+            logger.info("Pyro(start): canale presente nei dialoghi (no join).")
+            return
+    except Exception as e:
+        logger.info("Pyro(start): warm-up dialoghi fallito (non blocca): %s", e)
+
+    # 2) prova get_chat
+    try:
+        await pyro_client.get_chat(TELEGRAM_SOURCE_CHAT_ID)
+        PYRO_KNOWN_CHATS.add(TELEGRAM_SOURCE_CHAT_ID)
+        logger.info("Pyro(start): get_chat OK senza join.")
+        return
+    except Exception as e:
+        logger.info("Pyro(start): get_chat fallita: %s", e)
+
+    # 3) join solo se abbiamo un invite e non in backoff
+    invite = TG_CHAT_INVITE or _http_create_invite_link(TELEGRAM_SOURCE_CHAT_ID)
+    if not invite:
+        logger.info("Pyro(start): nessun invite disponibile, skip join (riceverai cancellazioni solo se già membro).")
+        return
+
+    now = time.time()
+    if now < JOIN_BACKOFF.get(TELEGRAM_SOURCE_CHAT_ID, 0):
+        logger.info("Pyro(start): join in backoff, skip.")
+        return
+
+    try:
+        await pyro_client.join_chat(invite)
+        logger.info("Pyro(start): join effettuato.")
+    except FloodWait as fw:
+        JOIN_BACKOFF[TELEGRAM_SOURCE_CHAT_ID] = time.time() + fw.value + 5
+        logger.warning("Pyro(start): FLOOD_WAIT %ss, riproverò solo dopo backoff.", fw.value)
+        return
+    except Exception as e:
+        if "USER_ALREADY_PARTICIPANT" in str(e).upper():
+            logger.info("Pyro(start): già partecipante.")
+        else:
+            logger.warning("Pyro(start): join fallita: %s", e)
+            return
+
+    # 4) dopo join, warm-up e verifica
+    try:
+        async for _ in pyro_client.get_dialogs():
+            pass
+        await pyro_client.get_chat(TELEGRAM_SOURCE_CHAT_ID)
+        PYRO_KNOWN_CHATS.add(TELEGRAM_SOURCE_CHAT_ID)
+        logger.info("Pyro(start): accesso OK dopo join+warm-up.")
+    except Exception as e:
+        logger.warning("Pyro(start): accesso KO anche dopo join: %s", e)
+
+async def _pyro_on_deleted(_, messages):
+    """
+    Handler realtime: quando Telegram cancella, rimuoviamo il mirror su Discord.
+    """
+    try:
+        ids = getattr(messages, "ids", []) or []
+        if not ids:
+            return
+        for mid in ids:
+            row = db_get_mapping(TELEGRAM_SOURCE_CHAT_ID, mid)
+            if not row:
+                continue
+            _, discord_id, webhook, _, _, thread_id = row
+            ok = delete_discord_message(webhook, discord_id, thread_id=thread_id)
+            if ok:
+                db_mark_deleted(TELEGRAM_SOURCE_CHAT_ID, mid)
+                logger.info("Delete realtime: tg_id=%s rimosso su Discord.", mid)
+    except Exception:
+        logger.exception("Delete realtime: errore handler")
+
+async def _start_pyrogram_and_handlers(app: Application):
+    """
+    Avvia un client Pyrogram persistente e registra DeletedMessagesHandler.
+    """
+    global pyro_client
+    if not (TG_API_ID and TG_API_HASH and TG_SESSION):
+        logger.info("Pyrogram disabilitato.")
+        return
+
+    from pyrogram import Client, filters
+    from pyrogram.handlers import DeletedMessagesHandler
+
+    pyro_client = Client(
+        name=":bridge:",
+        api_id=TG_API_ID,
+        api_hash=TG_API_HASH,
+        session_string=TG_SESSION,
+        no_updates=False,              # vogliamo ricevere gli update
+        workdir=tempfile.gettempdir(),
+    )
+
+    await pyro_client.start()
+    logger.info("Pyrogram: connesso.")
+    # ensure access una volta (senza flood)
+    await _pyro_ensure_access_once()
+
+    # handler cancellazioni solo per la chat sorgente
+    pyro_client.add_handler(DeletedMessagesHandler(_pyro_on_deleted, filters.chat(TELEGRAM_SOURCE_CHAT_ID)))
+    logger.info("Pyrogram: DeletedMessagesHandler registrato.")
+
+# ========= Startup & wiring =========
 async def _post_init(app: Application) -> None:
     global BOT_ID, BOT_USERNAME
     db_init()
@@ -851,15 +800,17 @@ async def _post_init(app: Application) -> None:
         bool(DISCORD_WEBHOOK_SCALPING), bool(DISCORD_WEBHOOK_ALGORITMO),
         bool(DISCORD_WEBHOOK_FORMAZIONE), bool(DISCORD_WEBHOOK_DEFAULT)
     )
-    logger.info("Pyrogram enabled=%s (API_ID set=%s, SESSION set=%s)",
-                bool(TG_SESSION), bool(TG_API_ID and TG_API_HASH), bool(TG_SESSION))
+    logger.info("Pyrogram enabled=%s (API_ID=%s, SESSION=%s)", bool(TG_SESSION), bool(TG_API_ID and TG_API_HASH), bool(TG_SESSION))
 
-    # JobQueue se disponibile, altrimenti loop asyncio
+    # Avvia Pyrogram persistente + handler delete
+    app.create_task(_start_pyrogram_and_handlers(app))
+
+    # Scheduler: solo reconcile EDIT (delete è realtime)
     if getattr(app, "job_queue", None):
-        logger.info("Scheduler: uso JobQueue PTB ogni 10s.")
+        logger.info("Scheduler: JobQueue PTB ogni 10s (EDIT).")
         app.job_queue.run_repeating(reconcile_last_messages, interval=10, first=10)
     else:
-        logger.warning("Scheduler: JobQueue assente -> uso loop asyncio ogni 10s.")
+        logger.warning("Scheduler: nessun JobQueue -> loop asyncio (EDIT) ogni 10s.")
         async def _reconcile_loop():
             while True:
                 try:
@@ -868,7 +819,6 @@ async def _post_init(app: Application) -> None:
                     logger.exception("Reconcile loop: errore")
                 await asyncio.sleep(10)
         app.create_task(_reconcile_loop())
-
 
 def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -884,11 +834,11 @@ def run_polling(app: Application) -> None:
     logger.info("Avvio in polling…")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
-
 if __name__ == "__main__":
     application = build_application()
     add_handlers(application)
     run_polling(application)
+
 
 
 
