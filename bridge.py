@@ -83,7 +83,6 @@ if TG_SESSION:
 else:
     bridge_log.info("pyrogram=disabled (manca session string)")
 
-# HTTP base
 PORT = int(os.getenv("PORT", "8080"))
 
 # Cache/State
@@ -477,6 +476,8 @@ async def _pyro_on_edited(_, message):
         mid = message.id
         row = db_get_mapping(TELEGRAM_SOURCE_CHAT_ID, mid)
         if not row:
+            # non creare un nuovo messaggio! niente POST.
+            bridge_log.info("edit op=realtime skip reason=no_mapping tg_msg=%s", mid)
             return
         _, discord_id, webhook, *_ , thread_id = row
         text_md = tg_html_to_discord_md(message.caption_html or message.text_html or "")
@@ -801,16 +802,39 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bridge_log.exception("mapping upsert fail")
 
 async def on_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Se non vuoi realtime via Pyrogram, abilita questa per convertire edit via Bot API.
+    """
+    Bot API -> PATCH ONLY: non reinviare mai.
+    Se FORWARD_EDITS=True, le modifiche sono già gestite in realtime da Pyrogram (skip).
+    """
     if FORWARD_EDITS:
         return
-    await on_message(update, context)
+
+    msg: Message = update.effective_message
+    if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
+        return
+
+    row = db_get_mapping(msg.chat_id, msg.message_id)
+    if not row:
+        bridge_log.info("edit op=bot_api skip reason=no_mapping tg_msg=%s", msg.message_id)
+        return
+
+    _, discord_id, webhook, tg_edit_ts, last, thread_id = row
+
+    # Se l'edit Telegram cambia SOLO testo/caption -> PATCH
+    html = msg.caption_html or msg.text_html or ""
+    new_md = tg_html_to_discord_md(html)[:2000]
+
+    ok = edit_discord_message(webhook, discord_id, new_md, thread_id=thread_id)
+    if ok:
+        ts = int((msg.edit_date or msg.date).timestamp())
+        db_update_edit_ts_and_content(msg.chat_id, msg.message_id, ts, new_md)
+    bridge_log.info("edit op=bot_api tg_msg=%s esito=%s", msg.message_id, "ok" if ok else "fail")
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot attivo. Inoltro messaggi, cancellazioni realtime e reconcile soft.")
 
 # =========================
-# Reconcile soft (safety net)
+# Reconcile soft (safety net) - PATCH only
 # =========================
 async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
     start = time.time()
@@ -890,7 +914,7 @@ async def _post_init(app: Application) -> None:
     # Avvia Pyrogram persistente + handlers + ensure_access periodico
     app.create_task(_start_pyrogram_and_handlers(app))
 
-    # Scheduler asincrono leggero (no job-queue extra necessario)
+    # Scheduler asincrono leggero
     async def _reconcile_loop():
         while True:
             try:
@@ -907,7 +931,9 @@ def build_application() -> Application:
 
 def add_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start_cmd))
+    # Nuovi messaggi
     app.add_handler(MessageHandler(filters.ALL & (~filters.StatusUpdate.ALL), on_message))
+    # Edit: PATCH only, mai POST
     app.add_handler(MessageHandler(filters.UpdateType.EDITED, on_edited_message))
 
 def run_polling(app: Application) -> None:
