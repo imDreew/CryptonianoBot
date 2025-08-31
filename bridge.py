@@ -517,6 +517,512 @@ async def _start_pyrogram_and_handlers(app: Application):
         pyro_client.add_handler(EditedMessageHandler(_pyro_on_edited, filters.chat(TELEGRAM_SOURCE_CHAT_ID)))
     pyro_log.info("handlers registered deleted=%s edited=%s", True, FORWARD_EDITS)
 
+    async def _periodic_access():# bridge.py
+import os
+import io
+import re
+import time
+import logging
+import tempfile
+import shutil
+import subprocess
+import sqlite3
+import asyncio
+from html import unescape
+from typing import Optional
+
+import requests
+from requests import Response
+
+from telegram import Update, Message
+from telegram.ext import (
+    Application, ApplicationBuilder, ContextTypes,
+    MessageHandler, filters, CommandHandler
+)
+
+# =========================
+# Logging (pulito e chiaro)
+# =========================
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+bridge_log = logging.getLogger("bridge")
+pyro_log = logging.getLogger("pyro")
+discord_log = logging.getLogger("discord")
+
+class CtxAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        extra = " ".join(f"{k}={v}" for k, v in self.extra.items() if v is not None)
+        return f"{msg} {extra}".strip(), kwargs
+
+def with_ctx(logger, **ctx):
+    return CtxAdapter(logger, ctx)
+
+# =========================
+# Env / Config
+# =========================
+def env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name, str(default)).strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN mancante.")
+
+TELEGRAM_SOURCE_CHAT_ID = int(os.getenv("TELEGRAM_SOURCE_CHAT_ID", "0"))
+TELEGRAM_ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
+
+FORWARD_EDITS = env_bool("FORWARD_EDITS", False)      # True = edit realtime via Pyrogram
+INCLUDE_AUTHOR = env_bool("INCLUDE_AUTHOR", False)    # aggiunge firma autore
+
+DISCORD_WEBHOOK_SCALPING   = os.getenv("DISCORD_WEBHOOK_SCALPING", "").strip()
+DISCORD_WEBHOOK_ALGORITMO  = os.getenv("DISCORD_WEBHOOK_ALGORITMO", "").strip()
+DISCORD_WEBHOOK_FORMAZIONE = os.getenv("DISCORD_WEBHOOK_FORMAZIONE", "").strip()
+DISCORD_WEBHOOK_DEFAULT    = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip()
+
+WEBHOOK_MAP = {
+    "SCALPING": DISCORD_WEBHOOK_SCALPING,
+    "ALGORITMO": DISCORD_WEBHOOK_ALGORITMO,
+    "FORMAZIONE": DISCORD_WEBHOOK_FORMAZIONE,
+}
+
+BOT_API_LIMIT = 20 * 1024 * 1024        # 20MB Bot API
+DISCORD_MAX_BYTES = 100 * 1024 * 1024   # 100MB Discord
+
+# Pyrogram (user session)
+TG_API_ID   = int(os.getenv("TG_API_ID", "0"))
+TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
+TG_SESSION  = os.getenv("PYRO_SESSION", os.getenv("TG_SESSION", "")).strip()
+TG_CHAT_INVITE = os.getenv("TG_CHAT_INVITE", "").strip()  # opzionale, meglio se permanente
+
+if TG_SESSION:
+    bridge_log.info("pyrogram=enabled (session string presente)")
+else:
+    bridge_log.info("pyrogram=disabled (manca session string)")
+
+PORT = int(os.getenv("PORT", "8080"))
+
+# Cache/State
+PYRO_KNOWN_CHATS: set[int] = set()
+JOIN_BACKOFF: dict[int, float] = {}  # chat_id -> epoch per ritentare join
+PYRO_ACCESS_OK: bool = False
+
+# Stato bot
+BOT_ID: Optional[int] = None
+BOT_USERNAME: Optional[str] = None
+
+# =========================
+# DB (mapping Telegram<->Discord)
+# =========================
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "map.sqlite")
+
+def db_init():
+    con = sqlite3.connect(DB_PATH)
+    try:
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS map (
+            tg_chat_id INTEGER NOT NULL,
+            tg_message_id INTEGER NOT NULL,
+            tg_edit_ts INTEGER NOT NULL,
+            discord_message_id TEXT NOT NULL,
+            webhook_url TEXT NOT NULL,
+            last_content TEXT,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            discord_channel_id TEXT,
+            discord_thread_id TEXT,
+            PRIMARY KEY (tg_chat_id, tg_message_id)
+        )
+        """)
+        try: con.execute("ALTER TABLE map ADD COLUMN discord_channel_id TEXT")
+        except Exception: pass
+        try: con.execute("ALTER TABLE map ADD COLUMN discord_thread_id TEXT")
+        except Exception: pass
+        con.commit()
+    finally:
+        con.close()
+
+def db_upsert_mapping(tg_chat_id: int, tg_message_id: int, tg_edit_ts: int,
+                      discord_message_id: str, webhook_url: str, last_content: str,
+                      discord_channel_id: Optional[str], discord_thread_id: Optional[str]):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        con.execute("""
+        INSERT INTO map (tg_chat_id, tg_message_id, tg_edit_ts, discord_message_id, webhook_url, last_content, deleted, discord_channel_id, discord_thread_id)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+        ON CONFLICT(tg_chat_id, tg_message_id) DO UPDATE SET
+            tg_edit_ts=excluded.tg_edit_ts,
+            discord_message_id=excluded.discord_message_id,
+            webhook_url=excluded.webhook_url,
+            last_content=excluded.last_content,
+            deleted=0,
+            discord_channel_id=excluded.discord_channel_id,
+            discord_thread_id=excluded.discord_thread_id
+        """, (tg_chat_id, tg_message_id, tg_edit_ts, discord_message_id, webhook_url, last_content, discord_channel_id, discord_thread_id))
+        con.commit()
+    finally:
+        con.close()
+
+def db_mark_deleted(tg_chat_id: int, tg_message_id: int):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        con.execute("UPDATE map SET deleted=1 WHERE tg_chat_id=? AND tg_message_id=?", (tg_chat_id, tg_message_id))
+        con.commit()
+    finally:
+        con.close()
+
+def db_update_edit_ts_and_content(tg_chat_id: int, tg_message_id: int, edit_ts: int, content: str):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        con.execute("UPDATE map SET tg_edit_ts=?, last_content=? WHERE tg_chat_id=? AND tg_message_id=?",
+                    (edit_ts, content, tg_chat_id, tg_message_id))
+        con.commit()
+    finally:
+        con.close()
+
+def db_get_recent_mappings(tg_chat_id: int, limit: int = 20):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        cur = con.execute("""
+          SELECT tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id
+          FROM map
+          WHERE tg_chat_id=? AND deleted=0
+          ORDER BY tg_message_id DESC
+          LIMIT ?
+        """, (tg_chat_id, limit))
+        return list(cur.fetchall())
+    finally:
+        con.close()
+
+def db_get_mapping(tg_chat_id: int, tg_message_id: int):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        cur = con.execute("""
+          SELECT tg_message_id, discord_message_id, webhook_url, tg_edit_ts, last_content, discord_thread_id
+          FROM map
+          WHERE tg_chat_id=? AND tg_message_id=? AND deleted=0
+        """, (tg_chat_id, tg_message_id))
+        return cur.fetchone()
+    finally:
+        con.close()
+
+# =========================
+# Utils
+# =========================
+def file_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except Exception:
+        return 0
+
+def human_size(n: int) -> str:
+    x = float(n)
+    for unit in ["B","KB","MB","GB","TB"]:
+        if x < 1024 or unit == "TB":
+            return f"{x:.1f}{unit}"
+        x /= 1024
+    return f"{x:.1f}B"
+
+# =========================
+# HTML Telegram -> Markdown Discord
+# =========================
+def tg_html_to_discord_md(html: str) -> str:
+    if not html:
+        return ""
+    s = unescape(html)
+    s = re.sub(r"</?(b|strong)>", "**", s, flags=re.I)
+    s = re.sub(r"</?(i|em)>", "*", s, flags=re.I)
+    s = re.sub(r"<u>(.*?)</u>", r"__\1__", s, flags=re.I | re.S)
+    s = re.sub(r"<(s|del)>(.*?)</\1>", r"~~\2~~", s, flags=re.I | re.S)
+    s = re.sub(r"<code>(.*?)</code>", r"`\1`", s, flags=re.I | re.S)
+    s = re.sub(
+        r"<pre.*?>\s*<code.*?class=['\"]?language-([\w+\-]+)['\"]?.*?>(.*?)</code>\s*</pre>",
+        r"```\1\n\2\n```", s, flags=re.I | re.S
+    )
+    s = re.sub(r"<pre.*?>(.*?)</pre>", r"```\n\1\n```", s, flags=re.I | re.S)
+    s = re.sub(r'<a\s+href=["\'](.*?)["\']>(.*?)</a>', r"[\2](\1)", s, flags=re.I | re.S)
+    s = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"||\1||", s, flags=re.I | re.S)
+    s = re.sub(r"<blockquote>(.*?)</blockquote>", r">\1", s, flags=re.I | re.S)
+    s = re.sub(r"</?[^>]+>", "", s)
+    s = s.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    s = re.sub(r"[ \t]+\n", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+    return s
+
+# =========================
+# Discord helpers (retry + wait)
+# =========================
+def _ensure_wait(url: str) -> str:
+    return url + ("&wait=true" if "?" in url else "?wait=true")
+
+def _post_with_retry(url: str, **kwargs) -> Response:
+    last = None
+    for attempt in range(5):
+        r = requests.post(url, timeout=600, **kwargs)
+        if r.status_code not in (429,) and r.status_code < 500:
+            return r
+        wait = min(2 ** attempt, 30)
+        discord_log.warning("post_retry status=%s wait_s=%s", r.status_code, wait)
+        time.sleep(wait)
+        last = r
+    return last
+
+def _patch_with_retry(url: str, **kwargs) -> Response:
+    last = None
+    for attempt in range(5):
+        r = requests.patch(url, timeout=600, **kwargs)
+        if r.status_code not in (429,) and r.status_code < 500:
+            return r
+        wait = min(2 ** attempt, 30)
+        discord_log.warning("patch_retry status=%s wait_s=%s", r.status_code, wait)
+        time.sleep(wait)
+        last = r
+    return last
+
+def _delete_with_retry(url: str, **kwargs) -> Response:
+    last = None
+    for attempt in range(5):
+        r = requests.delete(url, timeout=600, **kwargs)
+        if r.status_code not in (429,) and r.status_code < 500:
+            return r
+        wait = min(2 ** attempt, 30)
+        discord_log.warning("delete_retry status=%s wait_s=%s", r.status_code, wait)
+        time.sleep(wait)
+        last = r
+    return last
+
+def send_discord_text(webhook_url: str, content: str):
+    if not webhook_url:
+        discord_log.info("send_text skip=no_webhook")
+        return False, None, None, None
+    url = _ensure_wait(webhook_url)
+    r = _post_with_retry(url, json={"content": content})
+    ok, msg_id, ch_id, th_id = False, None, None, None
+    if r is not None and 200 <= r.status_code < 300:
+        try:
+            j = r.json()
+            msg_id = j.get("id")
+            ch_id = j.get("channel_id")
+            th_id = ch_id
+            ok = True
+        except Exception:
+            ok = True
+    discord_log.log(logging.INFO if ok else logging.ERROR, "send_text status=%s", getattr(r, "status_code", "NA"))
+    return ok, msg_id, ch_id, th_id
+
+def send_discord_file_bytes(webhook_url: str, file_bytes: bytes, filename: str, content: Optional[str] = None):
+    if not webhook_url:
+        discord_log.info("send_file skip=no_webhook")
+        return False, None, None, None
+    url = _ensure_wait(webhook_url)
+    files = {"file": (filename, io.BytesIO(file_bytes))}
+    data = {"content": content} if content else {}
+    r = _post_with_retry(url, files=files, data=data)
+    ok, msg_id, ch_id, th_id = False, None, None, None
+    if r is not None and 200 <= r.status_code < 300:
+        try:
+            j = r.json()
+            msg_id = j.get("id")
+            ch_id = j.get("channel_id")
+            th_id = ch_id
+            ok = True
+        except Exception:
+            ok = True
+    discord_log.log(logging.INFO if ok else logging.ERROR, "send_file status=%s filename=%s", getattr(r, "status_code", "NA"), filename)
+    return ok, msg_id, ch_id, th_id
+
+def send_discord_file_path(webhook_url: str, path: str, content: Optional[str] = None):
+    with open(path, "rb") as fh:
+        data = fh.read()
+    name = os.path.basename(path)
+    return send_discord_file_bytes(webhook_url, data, name, content)
+
+def edit_discord_message(webhook_url: str, message_id: str, new_content: str, thread_id: Optional[str] = None) -> bool:
+    url = f"{webhook_url}/messages/{message_id}"
+    if thread_id:
+        url += f"?thread_id={thread_id}"
+    url = _ensure_wait(url)
+    r = _patch_with_retry(url, json={"content": new_content})
+    ok = r is not None and 200 <= r.status_code < 300
+    discord_log.log(logging.INFO if ok else logging.ERROR, "edit status=%s", getattr(r, "status_code", "NA"))
+    return ok
+
+def delete_discord_message(webhook_url: str, message_id: str, thread_id: Optional[str] = None) -> bool:
+    url = f"{webhook_url}/messages/{message_id}"
+    if thread_id:
+        url += f"?thread_id={thread_id}"
+    r = _delete_with_retry(url)
+    if r is not None and (200 <= r.status_code < 300 or r.status_code == 404):
+        discord_log.info("delete status=%s", r.status_code)
+        return True
+    discord_log.warning("delete fail status=%s -> tombstone", getattr(r, "status_code", "NA"))
+    return edit_discord_message(webhook_url, message_id, "*(eliminato su Telegram)*", thread_id=thread_id)
+
+# =========================
+# Bot-side: autoinvite (fallback HTTP, se serve)
+# =========================
+def _http_create_invite_link(chat_id: int) -> Optional[str]:
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/createChatInviteLink"
+        r = requests.post(url, json={
+            "chat_id": chat_id, "name": "bridge-autoinvite",
+            "creates_join_request": False, "member_limit": 0
+        }, timeout=30)
+        if r.ok and r.json().get("ok"):
+            bridge_log.info("autoinvite=created via Bot API")
+            return r.json()["result"]["invite_link"]
+        bridge_log.warning("autoinvite=create_fail status=%s", r.status_code)
+    except Exception as e:
+        bridge_log.warning("autoinvite=exception err=%s", e)
+    return None
+
+# =========================
+# Pyrogram client persistente
+# =========================
+pyro_client = None  # istanza Client
+
+async def _pyro_ensure_access() -> None:
+    global PYRO_ACCESS_OK
+    if not pyro_client:
+        return
+    from pyrogram.errors import FloodWait
+
+    if PYRO_ACCESS_OK or (TELEGRAM_SOURCE_CHAT_ID in PYRO_KNOWN_CHATS):
+        try:
+            await pyro_client.get_chat(TELEGRAM_SOURCE_CHAT_ID)
+            PYRO_ACCESS_OK = True
+            return
+        except Exception:
+            PYRO_ACCESS_OK = False
+
+    try:
+        found = False
+        async for d in pyro_client.get_dialogs():
+            if getattr(d.chat, "id", None) == TELEGRAM_SOURCE_CHAT_ID:
+                found = True
+                break
+        if found:
+            PYRO_KNOWN_CHATS.add(TELEGRAM_SOURCE_CHAT_ID)
+            PYRO_ACCESS_OK = True
+            bridge_log.info("access source=dialogs esito=ok")
+            return
+    except Exception as e:
+        bridge_log.info("access warmup=fail err=%s", e)
+
+    try:
+        await pyro_client.get_chat(TELEGRAM_SOURCE_CHAT_ID)
+        PYRO_KNOWN_CHATS.add(TELEGRAM_SOURCE_CHAT_ID)
+        PYRO_ACCESS_OK = True
+        bridge_log.info("access source=get_chat esito=ok")
+        return
+    except Exception as e:
+        bridge_log.info("access get_chat=fail err=%s", e)
+
+    invite = TG_CHAT_INVITE or _http_create_invite_link(TELEGRAM_SOURCE_CHAT_ID)
+    if not invite:
+        PYRO_ACCESS_OK = False
+        bridge_log.info("access join=skip reason=no_invite")
+        return
+
+    now = time.time()
+    until = JOIN_BACKOFF.get(TELEGRAM_SOURCE_CHAT_ID, 0)
+    if now < until:
+        bridge_log.info("access join=skip reason=backoff wait_s=%s", int(until - now))
+        PYRO_ACCESS_OK = False
+        return
+
+    try:
+        await pyro_client.join_chat(invite)
+        bridge_log.info("access join=ok")
+    except FloodWait as fw:
+        JOIN_BACKOFF[TELEGRAM_SOURCE_CHAT_ID] = time.time() + fw.value + 5
+        PYRO_ACCESS_OK = False
+        bridge_log.warning("access join=flood_wait wait_s=%s", fw.value)
+        return
+    except Exception as e:
+        if "USER_ALREADY_PARTICIPANT" in str(e).upper():
+            bridge_log.info("access join=already_participant")
+        else:
+            JOIN_BACKOFF[TELEGRAM_SOURCE_CHAT_ID] = time.time() + 60
+            PYRO_ACCESS_OK = False
+            bridge_log.warning("access join=fail backoff_s=60 err=%s", e)
+            return
+
+    try:
+        async for _ in pyro_client.get_dialogs():
+            pass
+        await pyro_client.get_chat(TELEGRAM_SOURCE_CHAT_ID)
+        PYRO_KNOWN_CHATS.add(TELEGRAM_SOURCE_CHAT_ID)
+        PYRO_ACCESS_OK = True
+        bridge_log.info("access verify=ok")
+    except Exception as e:
+        PYRO_ACCESS_OK = False
+        bridge_log.warning("access verify=fail err=%s", e)
+
+async def _pyro_on_deleted(_, messages):
+    try:
+        ids = getattr(messages, "ids", []) or []
+        for mid in ids:
+            row = db_get_mapping(TELEGRAM_SOURCE_CHAT_ID, mid)
+            if not row:
+                continue
+            _, discord_id, webhook, *_ , thread_id = row
+            ok = delete_discord_message(webhook, discord_id, thread_id=thread_id)
+            if ok:
+                db_mark_deleted(TELEGRAM_SOURCE_CHAT_ID, mid)
+            bridge_log.info("delete op=realtime tg_msg=%s esito=%s", mid, "ok" if ok else "fail")
+    except Exception as e:
+        bridge_log.exception("delete realtime error=%s", e)
+
+async def _pyro_on_edited(_, message):
+    try:
+        if not FORWARD_EDITS:
+            return
+        mid = message.id
+        row = db_get_mapping(TELEGRAM_SOURCE_CHAT_ID, mid)
+        if not row:
+            bridge_log.info("edit op=realtime skip reason=no_mapping tg_msg=%s", mid)
+            return
+        _, discord_id, webhook, *_ , thread_id = row
+        text_md = tg_html_to_discord_md(message.caption_html or message.text_html or "")
+        ok = edit_discord_message(webhook, discord_id, text_md[:2000], thread_id=thread_id)
+        if ok:
+            ts = int((getattr(message, "edit_date", None) or getattr(message, "date", None)).timestamp())
+            db_update_edit_ts_and_content(TELEGRAM_SOURCE_CHAT_ID, mid, ts, text_md[:2000])
+        bridge_log.info("edit op=realtime tg_msg=%s esito=%s", mid, "ok" if ok else "fail")
+    except Exception:
+        bridge_log.exception("edit realtime error")
+
+async def _start_pyrogram_and_handlers(app: Application):
+    global pyro_client
+    if not (TG_API_ID and TG_API_HASH and TG_SESSION):
+        bridge_log.info("pyrogram=start skip (config mancante)")
+        return
+
+    from pyrogram import Client, filters as pfilters
+    from pyrogram.handlers import DeletedMessagesHandler, EditedMessageHandler
+
+    pyro_client = Client(
+        name=":bridge:",
+        api_id=TG_API_ID,
+        api_hash=TG_API_HASH,
+        session_string=TG_SESSION,
+        no_updates=False,
+        workdir=tempfile.gettempdir(),
+    )
+    await pyro_client.start()
+    pyro_log.info("connected=1")
+
+    await _pyro_ensure_access()
+
+    pyro_client.add_handler(DeletedMessagesHandler(_pyro_on_deleted, pfilters.chat(TELEGRAM_SOURCE_CHAT_ID)))
+    if FORWARD_EDITS:
+        pyro_client.add_handler(EditedMessageHandler(_pyro_on_edited, pfilters.chat(TELEGRAM_SOURCE_CHAT_ID)))
+    pyro_log.info("handlers registered deleted=%s edited=%s", True, FORWARD_EDITS)
+
     async def _periodic_access():
         while True:
             try:
@@ -640,13 +1146,12 @@ async def notify_admin(context: ContextTypes.DEFAULT_TYPE, text: str):
             bridge_log.exception("notify_admin fail")
 
 # =========================
-# Pyro download helper (usa client persistente)
+# Pyro download helper
 # =========================
 async def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
     if not (TG_API_ID and TG_API_HASH and TG_SESSION and pyro_client):
         bridge_log.error("pyro_download skip reason=config_or_client_missing")
         return None
-    # assicurati accesso
     if not PYRO_ACCESS_OK:
         await _pyro_ensure_access()
         if not PYRO_ACCESS_OK:
@@ -674,7 +1179,17 @@ async def pyro_download_by_ids(chat_id: int, message_id: int) -> Optional[str]:
 # =========================
 # Handlers PTB
 # =========================
+def _is_edit(update: Update) -> bool:
+    return bool(update.edited_message or update.edited_channel_post)
+
+def _is_new(update: Update) -> bool:
+    return bool(update.message or update.channel_post)
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ### FIX: ignora *sempre* gli edit qui
+    if _is_edit(update):   # <- evita reinvio (POST) sugli edit
+        return
+
     msg: Message = update.effective_message
     if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
         return
@@ -803,13 +1318,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Bot API -> PATCH ONLY: non reinviare mai.
-    Se FORWARD_EDITS=True, le modifiche sono già gestite in realtime da Pyrogram (skip).
+    ### FIX: PATCH ONLY. Niente POST qui.
+    Se FORWARD_EDITS=True, Pyrogram già gestisce realtime → skip.
     """
     if FORWARD_EDITS:
         return
-
-    msg: Message = update.effective_message
+    # ### FIX: prendi l’oggetto edit vero, non effective_message
+    msg: Optional[Message] = update.edited_message or update.edited_channel_post
     if not msg or msg.chat_id != TELEGRAM_SOURCE_CHAT_ID:
         return
 
@@ -820,7 +1335,6 @@ async def on_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, discord_id, webhook, tg_edit_ts, last, thread_id = row
 
-    # Se l'edit Telegram cambia SOLO testo/caption -> PATCH
     html = msg.caption_html or msg.text_html or ""
     new_md = tg_html_to_discord_md(html)[:2000]
 
@@ -834,7 +1348,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot attivo. Inoltro messaggi, cancellazioni realtime e reconcile soft.")
 
 # =========================
-# Reconcile soft (safety net) - PATCH only
+# Reconcile soft (safety net) - PATCH only/DELETE
 # =========================
 async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
     start = time.time()
@@ -850,7 +1364,6 @@ async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
         if not recent:
             return
 
-        # quick check
         try:
             await pyro_client.get_chat(TELEGRAM_SOURCE_CHAT_ID)
         except Exception:
@@ -868,7 +1381,6 @@ async def reconcile_last_messages(context: ContextTypes.DEFAULT_TYPE):
                 m = None
 
             if not m:
-                # delete realtime dovrebbe averlo già gestito; safety:
                 ok = delete_discord_message(webhook_url, discord_message_id, thread_id=thread_id)
                 if ok:
                     db_mark_deleted(TELEGRAM_SOURCE_CHAT_ID, tg_message_id)
@@ -911,17 +1423,15 @@ async def _post_init(app: Application) -> None:
         bool(DISCORD_WEBHOOK_FORMAZIONE), bool(DISCORD_WEBHOOK_DEFAULT)
     )
 
-    # Avvia Pyrogram persistente + handlers + ensure_access periodico
     app.create_task(_start_pyrogram_and_handlers(app))
 
-    # Scheduler asincrono leggero
     async def _reconcile_loop():
         while True:
             try:
                 await reconcile_last_messages(None)
             except Exception:
                 bridge_log.exception("reconcile loop error")
-            await asyncio.sleep(180)   # ogni 3 minuti
+            await asyncio.sleep(180)
     app.create_task(_reconcile_loop())
 
 def build_application() -> Application:
@@ -931,10 +1441,10 @@ def build_application() -> Application:
 
 def add_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start_cmd))
-    # Nuovi messaggi
+    # Nuovi messaggi (mai edit qui)
     app.add_handler(MessageHandler(filters.ALL & (~filters.StatusUpdate.ALL), on_message))
-    # Edit: PATCH only, mai POST
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED, on_edited_message))
+    # Edit: handler dedicato
+    app.add_handler(MessageHandler(filters.ALL, on_edited_message))
 
 def run_polling(app: Application) -> None:
     bridge_log.info("mode=polling")
@@ -947,6 +1457,7 @@ if __name__ == "__main__":
     application = build_application()
     add_handlers(application)
     run_polling(application)
+
 
 
 
