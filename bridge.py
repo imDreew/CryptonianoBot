@@ -47,16 +47,38 @@ TELEGRAM_ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 FORWARD_EDITS = env_bool("FORWARD_EDITS", False)
 INCLUDE_AUTHOR = env_bool("INCLUDE_AUTHOR", False)
 
-# Webhooks Discord (SOLO QUESTI DUE + fallback opzionale)
-DISCORD_WEBHOOK_ANALISI_VOLUMETRICA = os.getenv("DISCORD_WEBHOOK_ANALISI_VOLUMETRICA", "").strip()
-DISCORD_WEBHOOK_FORMAZIONE_VOLUMI   = os.getenv("DISCORD_WEBHOOK_FORMAZIONE_VOLUMI", "").strip()
-DISCORD_WEBHOOK_DEFAULT             = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip()  # opzionale
+# ---------- Nuovo: caricamento dinamico dei webhook ----------
+def _load_webhook_map_from_env() -> dict[str, str]:
+    """
+    Legge tutte le env che iniziano con DISCORD_WEBHOOK_ (escluso DEFAULT)
+    e crea una mappa TAG -> URL. Esempi validi:
+      - DISCORD_WEBHOOK_ANALISI_VOLUMETRICA
+      - DISCORD_WEBHOOK_FORMAZIONE_VOLUMI
+      - DISCORD_WEBHOOK_FOO_BAR
+    L'hashtag corrispondente è #<TAG> (case-insensitive).
+    """
+    m: dict[str, str] = {}
+    for k, v in os.environ.items():
+        if not k.startswith("DISCORD_WEBHOOK_"):
+            continue
+        if k == "DISCORD_WEBHOOK_DEFAULT":
+            continue
+        url = (v or "").strip()
+        if not url:
+            continue
+        tag = k[len("DISCORD_WEBHOOK_"):].strip().upper()
+        tag = re.sub(r"[^A-Z0-9_]+", "_", tag)  # normalizzazione
+        if tag:
+            m[tag] = url
+    return m
 
-# Mappa tag -> webhook
-WEBHOOK_MAP = {
-    "ANALISI_VOLUMETRICA": DISCORD_WEBHOOK_ANALISI_VOLUMETRICA,
-    "FORMAZIONE_VOLUMI": DISCORD_WEBHOOK_FORMAZIONE_VOLUMI,
-}
+WEBHOOK_MAP = _load_webhook_map_from_env()
+DISCORD_WEBHOOK_DEFAULT = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip() or None
+
+if WEBHOOK_MAP:
+    logger.info("Routing: webhook dinamici caricati -> %s", ", ".join(f"#{t}" for t in sorted(WEBHOOK_MAP.keys())))
+else:
+    logger.warning("Routing: nessun DISCORD_WEBHOOK_* trovato (a parte DEFAULT). Userò solo DISCORD_WEBHOOK_DEFAULT.")
 
 # Limiti
 BOT_API_LIMIT = 20 * 1024 * 1024      # 20MB (Bot API)
@@ -403,20 +425,25 @@ def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES)
 # =========================
 def pick_webhook_from_text(text: str) -> Optional[str]:
     """
-    Cerca #ANALISI_VOLUMETRICA / #FORMAZIONE_VOLUMI (case-insensitive).
-    Fallback su DISCORD_WEBHOOK_DEFAULT se non matcha nulla.
+    Estrae gli hashtag dal testo (#TAG) e se #TAG è presente in WEBHOOK_MAP
+    (caricato dinamicamente da env), usa quel webhook. Altrimenti usa
+    DISCORD_WEBHOOK_DEFAULT (se impostato).
+    - Case-insensitive
+    - I TAG supportano [A-Za-z0-9_]
     """
-    up = (text or "").upper()
-    chosen = None
-    for tag, url in WEBHOOK_MAP.items():
-        if f"#{tag}" in up or f" {tag}" in up:
-            chosen = url
-            logger.info("Routing: trovato tag #%s -> webhook configurato=%s", tag, bool(url))
-            break
-    if not chosen:
-        chosen = DISCORD_WEBHOOK_DEFAULT or None
-        logger.info("Routing: nessun tag trovato -> uso webhook di default presente=%s", bool(chosen))
-    return chosen
+    tags = [m.group(1).upper() for m in re.finditer(r"#([A-Za-z0-9_]+)", text or "")]
+    for t in tags:
+        if t in WEBHOOK_MAP:
+            logger.info("Routing: trovato tag #%s -> webhook configurato=True", t)
+            return WEBHOOK_MAP[t]
+    if tags:
+        logger.info("Routing: hashtag presenti ma non mappati: %s",
+                    ", ".join("#"+t for t in tags if t not in WEBHOOK_MAP))
+    if DISCORD_WEBHOOK_DEFAULT:
+        logger.info("Routing: uso webhook di default.")
+        return DISCORD_WEBHOOK_DEFAULT
+    logger.warning("Routing: nessun webhook disponibile (né match né DEFAULT).")
+    return None
 
 
 def author_suffix(msg: Message) -> str:
@@ -602,12 +629,9 @@ async def _post_init(app: Application) -> None:
     logger.info("Bot: id=%s username=%s", BOT_ID, BOT_USERNAME)
     logger.info("Source chat: %s | Admin notify: %s", TELEGRAM_SOURCE_CHAT_ID, TELEGRAM_ADMIN_CHAT_ID)
     logger.info("Flags: FORWARD_EDITS=%s INCLUDE_AUTHOR=%s", FORWARD_EDITS, INCLUDE_AUTHOR)
-    logger.info(
-        "Discord webhooks: ANALISI_VOLUMETRICA=%s FORMAZIONE_VOLUMI=%s DEFAULT=%s",
-        bool(DISCORD_WEBHOOK_ANALISI_VOLUMETRICA),
-        bool(DISCORD_WEBHOOK_FORMAZIONE_VOLUMI),
-        bool(DISCORD_WEBHOOK_DEFAULT),
-    )
+    if WEBHOOK_MAP:
+        logger.info("Webhooks disponibili (dinamici): %s", ", ".join(f"#{t}" for t in sorted(WEBHOOK_MAP.keys())))
+    logger.info("Webhook DEFAULT presente=%s", bool(DISCORD_WEBHOOK_DEFAULT))
     logger.info("Pyrogram enabled=%s (API_ID set=%s, SESSION set=%s)",
                 bool(TG_SESSION), bool(TG_API_ID and TG_API_HASH), bool(TG_SESSION))
 
@@ -636,3 +660,4 @@ if __name__ == "__main__":
     application = build_application()
     add_handlers(application)
     run_polling(application)
+
