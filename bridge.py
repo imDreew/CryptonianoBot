@@ -48,17 +48,38 @@ TELEGRAM_ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID", "0"))
 FORWARD_EDITS = env_bool("FORWARD_EDITS", False)
 INCLUDE_AUTHOR = env_bool("INCLUDE_AUTHOR", False)
 
-# Webhooks Discord
-DISCORD_WEBHOOK_SCALPING   = os.getenv("DISCORD_WEBHOOK_SCALPING", "").strip()
-DISCORD_WEBHOOK_RISULTATI  = os.getenv("DISCORD_WEBHOOK_RISULTATI", "").strip()
-DISCORD_WEBHOOK_FORMAZIONE = os.getenv("DISCORD_WEBHOOK_FORMAZIONE", "").strip()
-DISCORD_WEBHOOK_DEFAULT    = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip()  # opzionale
+# ---------- Nuovo: caricamento dinamico dei webhook ----------
+def _load_webhook_map_from_env() -> dict[str, str]:
+    """
+    Legge tutte le env che iniziano con DISCORD_WEBHOOK_ (escluso DEFAULT)
+    e crea una mappa TAG -> URL. Esempi validi di env:
+      - DISCORD_WEBHOOK_SCALPING
+      - DISCORD_WEBHOOK_RISULTATI
+      - DISCORD_WEBHOOK_FORMAZIONE
+      - DISCORD_WEBHOOK_FOO_BAR
+    """
+    m: dict[str, str] = {}
+    for k, v in os.environ.items():
+        if not k.startswith("DISCORD_WEBHOOK_"):
+            continue
+        if k == "DISCORD_WEBHOOK_DEFAULT":
+            continue
+        url = (v or "").strip()
+        if not url:
+            continue
+        tag = k[len("DISCORD_WEBHOOK_"):].strip().upper()
+        # normalizza il tag: A-Z 0-9 _
+        tag = re.sub(r"[^A-Z0-9_]+", "_", tag)
+        if tag:
+            m[tag] = url
+    return m
 
-WEBHOOK_MAP = {
-    "SCALPING": DISCORD_WEBHOOK_SCALPING,
-    "RISULTATI": DISCORD_WEBHOOK_RISULTATI,
-    "FORMAZIONE": DISCORD_WEBHOOK_FORMAZIONE,
-}
+WEBHOOK_MAP = _load_webhook_map_from_env()
+DISCORD_WEBHOOK_DEFAULT = os.getenv("DISCORD_WEBHOOK_DEFAULT", "").strip() or None
+if WEBHOOK_MAP:
+    logger.info("Routing: webhook dinamici caricati -> %s", ", ".join(f"#{t}" for t in sorted(WEBHOOK_MAP.keys())))
+else:
+    logger.warning("Routing: nessun DISCORD_WEBHOOK_* trovato (a parte DEFAULT). Userò solo DISCORD_WEBHOOK_DEFAULT.")
 
 # Telegram file size limit per download diretto via Bot API
 BOT_API_LIMIT = 20 * 1024 * 1024  # 20MB
@@ -145,6 +166,7 @@ def tg_html_to_discord_md(html: str) -> str:
 # Discord helpers
 # =========================
 def _post_with_retry(url: str, **kwargs) -> Response:
+    last = None
     for attempt in range(5):
         r = requests.post(url, timeout=600, **kwargs)
         if r.status_code not in (429,) and r.status_code < 500:
@@ -152,8 +174,8 @@ def _post_with_retry(url: str, **kwargs) -> Response:
         wait = min(2 ** attempt, 30)
         logger.warning("Discord POST %s -> %s. Retry tra %ss", url, r.status_code, wait)
         time.sleep(wait)
-    return r
-
+        last = r
+    return last if last is not None else r
 
 def send_discord_text(webhook_url: str, content: str) -> bool:
     if not webhook_url:
@@ -161,11 +183,10 @@ def send_discord_text(webhook_url: str, content: str) -> bool:
         return False
     logger.info("Discord: invio testo (%d chars) al webhook selezionato.", len(content or ""))
     r = _post_with_retry(webhook_url, json={"content": content})
-    ok = 200 <= r.status_code < 300
+    ok = (r is not None) and 200 <= r.status_code < 300
     logger.log(logging.INFO if ok else logging.ERROR,
-               "Discord: risposta invio testo -> %s (%s)", r.status_code, r.text[:200])
+               "Discord: risposta invio testo -> %s (%s)", getattr(r, "status_code", "NA"), (r.text or "")[:200] if r is not None else "")
     return ok
-
 
 def send_discord_file_bytes(webhook_url: str, file_bytes: bytes, filename: str, content: Optional[str] = None) -> bool:
     if not webhook_url:
@@ -175,11 +196,10 @@ def send_discord_file_bytes(webhook_url: str, file_bytes: bytes, filename: str, 
     files = {"file": (filename, io.BytesIO(file_bytes))}
     data = {"content": content} if content else {}
     r = _post_with_retry(webhook_url, files=files, data=data)
-    ok = 200 <= r.status_code < 300
+    ok = (r is not None) and 200 <= r.status_code < 300
     logger.log(logging.INFO if ok else logging.ERROR,
-               "Discord: risposta upload file -> %s (%s)", r.status_code, r.text[:200])
+               "Discord: risposta upload file -> %s (%s)", getattr(r, "status_code", "NA"), (r.text or "")[:200] if r is not None else "")
     return ok
-
 
 def send_discord_file_path(webhook_url: str, path: str, content: Optional[str] = None) -> bool:
     with open(path, "rb") as fh:
@@ -192,10 +212,6 @@ def send_discord_file_path(webhook_url: str, path: str, content: Optional[str] =
 # Bot-side: crea autoinvite
 # =========================
 async def _get_autoinvite_for_pyro(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Optional[str]:
-    """
-    Crea un invite link (se il BOT è admin con permesso di invitare).
-    Ritorna l'URL o None se non possibile.
-    """
     logger.info("Autoinvite: provo a creare un link di invito via Bot API per chat_id=%s", chat_id)
     try:
         link = await context.bot.create_chat_invite_link(
@@ -218,10 +234,6 @@ async def _get_autoinvite_for_pyro(context: ContextTypes.DEFAULT_TYPE, chat_id: 
 async def pyro_download_by_ids(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int
 ) -> Optional[str]:
-    """
-    Usa Pyrogram (session string utente) per scaricare media >20MB.
-    - Se lo userbot non conosce il canale, prova a generare un autoinvite e joinare.
-    """
     if not (TG_API_ID and TG_API_HASH and TG_SESSION):
         logger.error("Pyrogram: configurazione mancante (TG_API_ID/API_HASH/SESSION).")
         return None
@@ -268,7 +280,6 @@ def is_video_filename(name: str) -> bool:
     return any(name.endswith(ext) for ext in (".mp4",".mov",".mkv",".webm",".avi",".m4v"))
 
 def probe_duration_seconds(input_path: str) -> Optional[float]:
-    """Ritorna la durata in secondi usando ffprobe, oppure None."""
     if not ffmpeg_available():
         return None
     try:
@@ -285,13 +296,6 @@ def probe_duration_seconds(input_path: str) -> Optional[float]:
         return None
 
 def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES) -> Optional[str]:
-    """
-    Transcodifica singola a bitrate calcolato (ABR) per stare sotto max_bytes.
-    - Stima bitrate = (max_bytes * 8 / duration) * safety
-    - Limita risorse: threads=1, preset veryfast
-    - Scala max 1920x1080, audio AAC 128k (o meno se necessario)
-    Ritorna il path del file compresso se <= max_bytes, altrimenti None.
-    """
     if not ffmpeg_available():
         logger.warning("ffmpeg non disponibile nel sistema: impossibile comprimere.")
         return None
@@ -310,26 +314,21 @@ def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES)
     except Exception:
         pass
 
-    # Obiettivo: stare sotto max_bytes con ~5% margine di sicurezza
     safety = 0.95
-    target_bits_total = max_bytes * 8 * safety  # bytes -> bit
+    target_bits_total = max_bytes * 8 * safety
 
-    # Audio di base 128k, ma riduciamo se necessario
     audio_kbps = 128
-
-    # video_bps = target_bits_total/duration - audio_bps
     video_bps = (target_bits_total / duration) - (audio_kbps * 1000)
-    if video_bps < 200_000:  # minima guardia qualità
+    if video_bps < 200_000:
         video_bps = 200_000
-        # Se siamo molto stretti, riduci audio
         if (target_bits_total / duration) < (video_bps + 96_000):
             audio_kbps = 96
         if (target_bits_total / duration) < (video_bps + 64_000):
             audio_kbps = 64
 
     video_kbps = int(video_bps // 1000)
-    maxrate_kbps = int(video_kbps * 1.15)          # picchi consentiti
-    bufsize_kbps = int(max(video_kbps * 2, 500))   # buffer
+    maxrate_kbps = int(video_kbps * 1.15)
+    bufsize_kbps = int(max(video_kbps * 2, 500))
 
     logger.info(
         "FFmpeg ABR: duration=%.2fs, video=%dk, audio=%dk, maxrate=%dk, bufsize=%dk",
@@ -368,11 +367,8 @@ def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES)
     if size <= max_bytes:
         return out_path
 
-    # Se siamo leggermente sopra, riprova al volo con un -10% bitrate video
     if size < int(max_bytes * 1.10):
-        more_kbps = int(video_kbps * 0.9)
-        if more_kbps < 200:
-            more_kbps = 200
+        more_kbps = max(200, int(video_kbps * 0.9))
         out_path2 = os.path.join(base_dir, f"{base_name}_abr_tight.mp4")
         try:
             if os.path.exists(out_path2):
@@ -413,20 +409,25 @@ def compress_video_to_limit(input_path: str, max_bytes: int = DISCORD_MAX_BYTES)
 # =========================
 def pick_webhook_from_text(text: str) -> Optional[str]:
     """
-    Cerca #SCALPING / #RISULTATI / #FORMAZIONE (case-insensitive).
-    Fallback su DISCORD_WEBHOOK_DEFAULT se non matcha nulla.
+    Se trova un hashtag #TAG e TAG è presente in WEBHOOK_MAP (caricato dinamicamente),
+    usa quel webhook; altrimenti fallback su DISCORD_WEBHOOK_DEFAULT (se presente).
+    - Case-insensitive
+    - I TAG sono composti da [A-Za-z0-9_]
     """
-    up = (text or "").upper()
-    chosen = None
-    for tag, url in WEBHOOK_MAP.items():
-        if f"#{tag}" in up or f" {tag}" in up:
-            chosen = url
-            logger.info("Routing: trovato tag #%s -> webhook configurato=%s", tag, bool(url))
-            break
-    if not chosen:
-        chosen = DISCORD_WEBHOOK_DEFAULT or None
-        logger.info("Routing: nessun tag trovato -> uso webhook di default presente=%s", bool(chosen))
-    return chosen
+    up = (text or "")
+    # estrai gli hashtag nell'ordine in cui compaiono
+    tags = [m.group(1).upper() for m in re.finditer(r"#([A-Za-z0-9_]+)", up)]
+    for t in tags:
+        if t in WEBHOOK_MAP:
+            logger.info("Routing: trovato tag #%s -> webhook configurato=True", t)
+            return WEBHOOK_MAP[t]
+    if tags:
+        logger.info("Routing: hashtag presenti ma non mappati: %s", ", ".join("#"+t for t in tags if t not in WEBHOOK_MAP))
+    if DISCORD_WEBHOOK_DEFAULT:
+        logger.info("Routing: uso webhook di default.")
+    else:
+        logger.warning("Routing: nessun webhook disponibile (né match né DEFAULT).")
+    return DISCORD_WEBHOOK_DEFAULT
 
 
 def author_suffix(msg: Message) -> str:
@@ -536,7 +537,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.debug("BotAPI: file_path=%s", f.file_path)
             resp = requests.get(f.file_path, timeout=600)
             resp.raise_for_status()
-            # scrivi su disco per uniformare il flusso
             with tempfile.NamedTemporaryFile(prefix="tg_dl_", suffix=os.path.splitext(file_name)[1] or ".bin", delete=False) as fh:
                 fh.write(resp.content)
                 path = fh.name
@@ -561,7 +561,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not ok:
                     await notify_admin(context, "Errore invio file compresso a Discord.")
             else:
-                # fallback: invia avviso
                 warn = (
                     f"⚠️ Il video supera il limite di 100MB di Discord.\n"
                     f"- Originale: {human_size(file_size(path))}\n"
@@ -570,7 +569,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 send_discord_text(webhook_url, (content + "\n\n" + warn).strip())
         else:
-            # Altrimenti invia direttamente
             ok = send_discord_file_path(webhook_url, path, content if content.strip() else None)
             if not ok:
                 await notify_admin(context, "Errore invio file a Discord.")
@@ -578,7 +576,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("FLOW: errore generale gestione media.")
         await notify_admin(context, "Errore generale gestione media")
     finally:
-        # Cleanup dei file temporanei
         for p in (comp_path, path):
             try:
                 if p and os.path.exists(p) and os.path.isfile(p):
@@ -612,11 +609,9 @@ async def _post_init(app: Application) -> None:
     logger.info("Bot: id=%s username=%s", BOT_ID, BOT_USERNAME)
     logger.info("Source chat: %s | Admin notify: %s", TELEGRAM_SOURCE_CHAT_ID, TELEGRAM_ADMIN_CHAT_ID)
     logger.info("Flags: FORWARD_EDITS=%s INCLUDE_AUTHOR=%s", FORWARD_EDITS, INCLUDE_AUTHOR)
-    logger.info(
-        "Discord webhooks: SCALPING=%s RISULTATI=%s FORMAZIONE=%s DEFAULT=%s",
-        bool(DISCORD_WEBHOOK_SCALPING), bool(DISCORD_WEBHOOK_RISULTATI),
-        bool(DISCORD_WEBHOOK_FORMAZIONE), bool(DISCORD_WEBHOOK_DEFAULT)
-    )
+    if WEBHOOK_MAP:
+        logger.info("Webhooks disponibili (dinamici): %s", ", ".join(f"#{t}" for t in sorted(WEBHOOK_MAP.keys())))
+    logger.info("Webhook DEFAULT presente=%s", bool(DISCORD_WEBHOOK_DEFAULT))
     logger.info("Pyrogram enabled=%s (API_ID set=%s, SESSION set=%s)",
                 bool(TG_SESSION), bool(TG_API_ID and TG_API_HASH), bool(TG_SESSION))
 
@@ -629,19 +624,17 @@ def build_application() -> Application:
     app.post_init = _post_init
     return app
 
-
 def add_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(MessageHandler(filters.ALL & (~filters.StatusUpdate.ALL), on_message))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED, on_edited_message))
 
-
 def run_polling(app: Application) -> None:
     logger.info("Avvio in polling…")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     application = build_application()
     add_handlers(application)
     run_polling(application)
+
