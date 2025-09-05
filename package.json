@@ -1,0 +1,18 @@
+{
+"name": "abbonati-form",
+"version": "1.0.0",
+"type": "module",
+"scripts": {
+"prestart": "prisma db push",
+"start": "node src/server.js"
+},
+"dependencies": {
+"@prisma/client": "^5.15.0",
+"discord.js": "^14.15.3",
+"dotenv": "^16.4.5",
+"express": "^4.19.2",
+"node-cron": "^3.0.3",
+"node-telegram-bot-api": "^0.66.0",
+"prisma": "^5.15.0"
+}
+}

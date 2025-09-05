@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Abbonamento — Registrazione</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial,sans-serif;background:#0b1220;color:#e6e6e6;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}
+form{background:#121a2b;border:1px solid #1f2a44;border-radius:16px;max-width:560px;width:100%;padding:24px;box-shadow:0 8px 22px rgba(0,0,0,.35)}
+h1{margin:.2rem 0 1rem;font-size:1.6rem}
+label{display:block;margin:.75rem 0 .35rem;color:#a9b1c7}
+input{width:100%;padding:12px;border-radius:10px;border:1px solid #2a3554;background:#0e1526;color:#f0f3fa}
+button{margin-top:16px;width:100%;padding:12px 16px;border-radius:10px;border:0;background:#4f7cff;color:white;font-weight:600;cursor:pointer}
+.hint{font-size:.9rem;color:#93a0be}
+</style>
+</head>
+<body>
+<form method="POST" action="/subscribe" autocomplete="on">
+<h1>Iscrizione Abbonamento</h1>
+<p class="hint">Compila tutti i campi: serviranno per collegare il tuo accesso su Discord/Telegram.</p>
+
+
+<label>Numero di telefono *</label>
+<input name="phone" type="tel" required placeholder="es. +39 333 1234567" />
+
+
+<label>Nickname Discord *</label>
+<input name="discordNick" required placeholder="es. username" />
+
+
+<label>Nickname Telegram *</label>
+<input name="telegramNick" required placeholder="es. @username" />
+
+
+<label>UID Bitget *</label>
+<input name="bitgetUid" required placeholder="es. 12345678" />
+
+
+<label>Email *</label>
+<input name="email" type="email" required placeholder="nome@dominio.com" />
+
+
+<button type="submit">Invia</button>
+<p class="hint">Dopo l'invio vedrai un codice da usare per collegare i bot.</p>
+</form>
+</body>
+</html>
