@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "prestart": "node scripts/prisma-push-retry.js",
+    "prestart": "node prisma/prisma-push-retry.js",
     "start": "node src/server.js"
   },
   "dependencies": {
