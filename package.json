@@ -15,4 +15,10 @@
 "node-telegram-bot-api": "^0.66.0",
 "prisma": "^5.15.0"
 }
+{
+"scripts": {
+"prestart": "node scripts/prisma-push-retry.js",
+"start": "node src/server.js"
+}
+}
 }
