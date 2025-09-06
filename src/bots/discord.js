@@ -1,4 +1,4 @@
-// src/discord.js
+// src/bots/discord.js
 import { Client, GatewayIntentBits } from 'discord.js';
 
 export async function startDiscordBot(prisma, env) {
@@ -10,7 +10,7 @@ export async function startDiscordBot(prisma, env) {
   } = env;
 
   if (!DISCORD_BOT_TOKEN || !DISCORD_GUILD_ID) {
-    console.log('Discord bot disabilitato (mancano DISCORD_BOT_TOKEN o DISCORD_GUILD_ID)');
+    console.log('⚠️ Discord bot disabilitato (manca DISCORD_BOT_TOKEN o DISCORD_GUILD_ID)');
     return { freeze: async () => false, unfreeze: async () => false };
   }
 
@@ -23,9 +23,9 @@ export async function startDiscordBot(prisma, env) {
     ]
   });
 
-  client.on('ready', () => console.log(`Discord bot online come ${client.user.tag}`));
+  client.once('ready', () => console.log(`🤖 Discord bot online come ${client.user.tag}`));
 
-  // Link: utente scrive "!link 123456" in un canale del server
+  // Comando !link CODICE
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (!message.guild || message.guild.id !== DISCORD_GUILD_ID) return;
@@ -43,7 +43,6 @@ export async function startDiscordBot(prisma, env) {
         data: { discordUserId: message.author.id }
       });
 
-      // Se è attivo, assegna ruolo ACTIVE e rimuovi FROZEN
       const guild = await client.guilds.fetch(DISCORD_GUILD_ID);
       const member = await guild.members.fetch(message.author.id).catch(() => null);
       if (member) {
@@ -60,7 +59,7 @@ export async function startDiscordBot(prisma, env) {
 
   await client.login(DISCORD_BOT_TOKEN);
 
-  // Helpers per freeze/unfreeze
+  // Helpers freeze/unfreeze
   async function freeze(discordUserId) {
     if (!discordUserId || !DISCORD_FROZEN_ROLE_ID) return false;
     try {
