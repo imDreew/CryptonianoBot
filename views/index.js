@@ -75,7 +75,4 @@ bot.on('message', async (msg) => {
 
 console.log('🚀 Telegram bot avviato');
 
-<p class="hint">Dopo l'invio vedrai un codice da usare per collegare i bot.</p>
-</form>
-</body>
-</html>
+
