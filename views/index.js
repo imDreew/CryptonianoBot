@@ -31,19 +31,23 @@ const genCode = () => {
 // ===== WIZARD STEPS =====
 const STEPS = ['phone', 'telegramNick', 'discordNick', 'bitgetUid', 'email', 'plan']; // plan con bottoni
 const PROMPT = {
-  phone:        '📞 Inserisci il tuo **numero di telefono** con prefisso (es. `+39...`).',
-  telegramNick: '✈️ Inserisci il tuo **nickname Telegram** iniziando con `@`.',
-  discordNick:  '🎮 Inserisci il tuo **nickname Discord**.',
-  bitgetUid:    '🪪 Inserisci il tuo **UID Bitget** (10 cifre).',
-  email:        '📧 Inserisci la tua **email**:',
-  plan:         '📦 Seleziona il **tipo di abbonamento**:'
+  phone:        '↘️ Inserisci il tuo **numero di telefono** con prefisso (es. `+39...`).',
+  telegramNick: '↘️ Inserisci il tuo **nickname Telegram** iniziando con `@`.',
+  discordNick:  '↘️ Inserisci il tuo **nickname Discord**.',
+  bitgetUid:    '↘️ Inserisci il tuo **UID Bitget** (10 cifre).',
+  email:        '↘️ Inserisci la tua **email**:',
+  plan:         '↘️ Seleziona il **tipo di abbonamento**:'
 };
 const sessions = new Map(); // chatId -> { step, data }
 
-function startFlow(chatId) {
+function startFlow(chatId, user) {
+  const name = user?.first_name || user?.username || 'amico';
   sessions.set(chatId, { step: 0, data: {} });
-  bot.sendMessage(chatId, 'Ciao! 👋 Ti farò qualche domanda per registrarti.', { parse_mode: 'Markdown' })
-    .then(() => bot.sendMessage(chatId, PROMPT.phone, { parse_mode: 'Markdown' }));
+  bot.sendMessage(
+    chatId,
+    `Ciao ${name}! 👋\nProcedi a compilare le informazioni richieste per la registrazione al server *CRYPTONIANO VIP CLUB* 👑`,
+    { parse_mode: 'Markdown' }
+  ).then(() => bot.sendMessage(chatId, PROMPT.phone, { parse_mode: 'Markdown' }));
 }
 
 bot.onText(/^\/start$/, (msg) => startFlow(msg.chat.id));
