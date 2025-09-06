@@ -78,13 +78,13 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(chatId, '⚠️ Numero non valido.\n- Inizia con `+` (es. +39)\n- 8–15 cifre totali\nEsempio: `+393401234567`', { parse_mode: 'Markdown' });
   }
   if (key === 'telegramNick' && !isTelegram(text)) {
-    return bot.sendMessage(chatId, '⚠️ Nick Telegram non valido.\n- Deve iniziare con `@`\n- 5–32 caratteri (lettere/numeri/underscore)\nEsempio: `@CryptoNiano`', { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, '⚠️ Nick Telegram non valido.\n- Deve iniziare con `@`\n- 5–32 caratteri (lettere/numeri/underscore)\nEsempio: `@Cryptoniano`', { parse_mode: 'Markdown' });
   }
   if (key === 'bitgetUid' && !isBitget(text)) {
-    return bot.sendMessage(chatId, '⚠️ UID Bitget non valido.\n- Deve avere **10 cifre** (es. `1234567890`)', { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, '⚠️ UID Bitget non valido.\n- Deve avere **10 cifre** ', { parse_mode: 'Markdown' });
   }
   if (key === 'email' && !isEmail(text)) {
-    return bot.sendMessage(chatId, '⚠️ Email non valida. Esempio: `nome@dominio.com`', { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, '⚠️ Email non valida. Esempio: `cryptoniano@futures.com`', { parse_mode: 'Markdown' });
   }
 
   // salva e avanza
