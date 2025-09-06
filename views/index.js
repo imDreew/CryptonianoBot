@@ -1,50 +1,49 @@
 import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 import { PrismaClient } from '@prisma/client';
-import http from 'node:http';
 
 const prisma = new PrismaClient();
-const { TELEGRAM_BOT_TOKEN } = process.env;
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error('Missing TELEGRAM_BOT_TOKEN'); process.exit(1);
-}
-
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
-
-// === WIZARD ===
+// === STEP FLOW ===
 const STEPS = ['phone', 'telegramNick', 'discordNick', 'bitgetUid', 'email'];
 const PROMPT = {
-  phone:        '📞 Inserisci il tuo **numero di telefono** con prefisso internazionale (es. `+39XXXXXXXXX`):',
-  telegramNick: '✈️ Inserisci il tuo **nickname Telegram** (deve iniziare con `@`):',
-  discordNick:  '🎮 Inserisci il tuo **nickname Discord**:',
-  bitgetUid:    '🪪 Inserisci il tuo **UID Bitget** (esattamente 10 cifre):',
-  email:        '📧 Inserisci la tua **email**:'
+  phone:        '📞 Inserisci il tuo **numero di telefono** con prefisso (es. `+39...`).',
+  telegramNick: '✈️ Inserisci il tuo **nickname Telegram** iniziando con `@`.',
+  discordNick:  '🎮 Inserisci il tuo **nickname Discord**.',
+  bitgetUid:    '🪪 Inserisci il tuo **UID Bitget** (10 cifre).',
+  email:        '📧 Inserisci la tua **email**.'
 };
 
-// === VALIDATORS ===
-const isE164Phone = v => /^\+[1-9]\d{7,14}$/.test(String(v).trim());                 // +[country][number], 8–15 cifre totali
-const isTelegramHandle = v => /^@[a-zA-Z0-9_]{5,32}$/.test(String(v).trim());        // @username
-const isBitgetUid = v => /^\d{10}$/.test(String(v).trim());                           // 10 cifre
-const isEmail = v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v).trim());             // semplice ma robusto
+const sessions = new Map();
 
-// === SUPPORT CODE ===
-const genSupportCode = () => Math.random().toString(36).slice(2, 10).toUpperCase();  // 8 chars A-Z0-9
+// === VALIDAZIONI ===
+// E.164: + prefisso e 8–15 cifre totali (adatta se vuoi più restrittivo)
+const isPhone = (v) => /^\+[1-9]\d{7,14}$/.test(v.trim());
+// Telegram @username: 5–32, lettere/numeri/underscore
+const isTelegram = (v) => /^@[a-zA-Z0-9_]{5,32}$/.test(v.trim());
+// Bitget UID: esattamente 10 cifre
+const isBitget = (v) => /^\d{10}$/.test(v.trim());
+// Email semplice ma robusta
+const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
-const sessions = new Map(); // chatId -> { step, data }
+// Codice di conferma: 8 caratteri alfanumerici maiuscoli (no 0/O, 1/I)
+const genCode = () => {
+  const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+  let out = '';
+  for (let i = 0; i < 8; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out;
+};
 
 function startFlow(chatId) {
   sessions.set(chatId, { step: 0, data: {} });
-  bot.sendMessage(chatId,
-    'Ciao! 👋 Ti farò qualche domanda per registrarti. Se sbagli qualcosa, te lo segnalerò subito.',
-    { parse_mode: 'Markdown' }
-  ).then(() => bot.sendMessage(chatId, PROMPT.phone, { parse_mode: 'Markdown' }));
+  bot.sendMessage(chatId, 'Ciao! 👋 Ti farò qualche domanda per registrarti.', { parse_mode: 'Markdown' })
+    .then(() => bot.sendMessage(chatId, PROMPT.phone, { parse_mode: 'Markdown' }));
 }
 
 bot.onText(/^\/start$/, (msg) => startFlow(msg.chat.id));
 bot.onText(/^\/restart$/, (msg) => { sessions.delete(msg.chat.id); startFlow(msg.chat.id); });
 
-// === MESSAGES HANDLER ===
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
@@ -53,77 +52,70 @@ bot.on('message', async (msg) => {
   const s = sessions.get(chatId);
   if (!s) return;
 
-  const step = STEPS[s.step];
+  const key = STEPS[s.step];
 
-  // Validazioni step-by-step
-  if (step === 'phone' && !isE164Phone(text)) {
-    return bot.sendMessage(chatId, '⚠️ Formato non valido. Usa il prefisso internazionale, es. `+39XXXXXXXXX`.', { parse_mode: 'Markdown' });
+  // --- VALIDAZIONI PER CAMPO ---
+  if (key === 'phone' && !isPhone(text)) {
+    return bot.sendMessage(
+      chatId,
+      '⚠️ Numero non valido.\n- Deve iniziare con `+` e prefisso (es. +39)\n- Deve avere 8–15 cifre totali\nEsempio: `+393401234567`',
+      { parse_mode: 'Markdown' }
+    );
   }
-  if (step === 'telegramNick' && !isTelegramHandle(text)) {
-    return bot.sendMessage(chatId, '⚠️ Il nickname Telegram deve iniziare con `@` e avere 5–32 caratteri alfanumerici/underscore.', { parse_mode: 'Markdown' });
+  if (key === 'telegramNick' && !isTelegram(text)) {
+    return bot.sendMessage(
+      chatId,
+      '⚠️ Nickname Telegram non valido.\n- Deve iniziare con `@`\n- 5–32 caratteri, solo lettere/numeri/underscore\nEsempio: `@CryptoNiano`',
+      { parse_mode: 'Markdown' }
+    );
   }
-  if (step === 'bitgetUid' && !isBitgetUid(text)) {
-    return bot.sendMessage(chatId, '⚠️ L’UID Bitget deve essere **esattamente 10 cifre**.', { parse_mode: 'Markdown' });
+  if (key === 'bitgetUid' && !isBitget(text)) {
+    return bot.sendMessage(
+      chatId,
+      '⚠️ UID Bitget non valido.\n- Deve essere composto da **10 cifre** (esempio: `1234567890`).',
+      { parse_mode: 'Markdown' }
+    );
   }
-  if (step === 'email' && !isEmail(text)) {
-    return bot.sendMessage(chatId, '⚠️ Email non valida. Esempio valido: `nome@dominio.com`.', { parse_mode: 'Markdown' });
+  if (key === 'email' && !isEmail(text)) {
+    return bot.sendMessage(
+      chatId,
+      '⚠️ Email non valida. Esempio: `nome@dominio.com`',
+      { parse_mode: 'Markdown' }
+    );
   }
 
-  // Salva il valore valido e passa avanti
-  s.data[step] = text;
+  // Salva risposta valida nello stato e passa allo step successivo
+  s.data[key] = text;
   s.step++;
 
   if (s.step >= STEPS.length) {
-    // Genera supportCode (unico)
-    let supportCode = genSupportCode();
+    // Tutti i dati ok → genera codice e salva
+    let verifyCode = genCode();
     for (let i = 0; i < 5; i++) {
       try {
-        const payload = {
-          phone: s.data.phone,
-          telegramNick: s.data.telegramNick,
-          discordNick: s.data.discordNick,
-          bitgetUid: s.data.bitgetUid,
-          email: s.data.email,
-          supportCode
-        };
         await prisma.subscriber.upsert({
           where: { email: s.data.email },
-          update: payload,
-          create: payload
+          update: { ...s.data, verifyCode },
+          create: { ...s.data, verifyCode }
         });
-        break; // ok
+        break;
       } catch (e) {
-        // collisione (rarissima) su supportCode
-        if (String(e).includes('Unique') || String(e).includes('supportCode')) {
-          supportCode = genSupportCode();
-          continue;
-        }
-        console.error('DB save error', e);
-        await bot.sendMessage(chatId, '❌ Errore interno nel salvataggio. Riprova più tardi.');
-        sessions.delete(chatId);
-        return;
+        // collisione rara sul codice: rigenera e riprova
+        if (String(e).includes('verifyCode')) { verifyCode = genCode(); continue; }
+        throw e;
       }
     }
 
     await bot.sendMessage(
       chatId,
-      `✅ Registrazione completata!\n\n` +
-      `🔐 *Codice di conferma* (da comunicare al supporto):\n\`\`\`\n${supportCode}\n\`\`\`\n` +
-      `📩 Email: ${s.data.email}\n` +
-      `📞 Telefono: ${s.data.phone}\n` +
-      `✈️ Telegram: ${s.data.telegramNick}\n` +
-      `🎮 Discord: ${s.data.discordNick}\n` +
-      `🪪 Bitget UID: ${s.data.bitgetUid}`,
+      `✅ Registrazione completata!\n\n🔐 *Codice di conferma*: \`${verifyCode}\`\n\nConserva questo codice: ti servirà per il supporto.`,
       { parse_mode: 'Markdown' }
     );
-
     sessions.delete(chatId);
   } else {
-    const next = STEPS[s.step];
-    bot.sendMessage(chatId, PROMPT[next], { parse_mode: 'Markdown' });
+    const nextKey = STEPS[s.step];
+    bot.sendMessage(chatId, PROMPT[nextKey], { parse_mode: 'Markdown' });
   }
 });
 
-// Healthcheck HTTP (facoltativo, utile per Railway)
-http.createServer((_, res) => { res.writeHead(200); res.end('OK - subs-collector-bot'); })
-  .listen(process.env.PORT || 3000, () => console.log('Health server on /'));
+console.log('🚀 Telegram bot avviato con validazioni & codice di conferma');
