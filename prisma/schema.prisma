@@ -1,9 +1,24 @@
 // prisma/schema.prisma
-datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
-generator client { provider = "prisma-client-js" }
 
-enum Plan { MONTHLY ANNUAL }
-enum Status { PENDING ACTIVE FROZEN }
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Plan {
+  MONTHLY
+  ANNUAL
+}
+
+enum Status {
+  PENDING
+  ACTIVE
+  FROZEN
+}
 
 model Subscriber {
   id             String   @id @default(cuid())
@@ -25,6 +40,7 @@ model Subscriber {
   @@index([telegramUserId])
   @@index([discordUserId])
 }
+
 
 
 
