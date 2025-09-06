@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "prestart": "sh -c 'for i in $(seq 1 30); do npx prisma db push && exit 0; echo waiting for db...; sleep 5; done; exit 1'",
-    "start": "node src/index.js"
+    "start": "node views/index.js"
   },
   "dependencies": {
     "@prisma/client": "^5.15.0",
