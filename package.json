@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "prestart": "sh -c 'for i in $(seq 1 30); do npx prisma db push --accept-data-loss && exit 0; echo waiting for db...; sleep 5; done; exit 1'"
-    "start": "node views/index.js"
+    "prestart": "sh -c 'for i in $(seq 1 30); do npx prisma db push --accept-data-loss && exit 0; echo waiting for db...; sleep 5; done; exit 1'",
+    "start": "node src/index.js"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
@@ -13,5 +13,6 @@
     "prisma": "^5.22.0"
   }
 }
+
 
 
