@@ -1,3 +1,25 @@
+// prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Plan {
+  MONTHLY
+  ANNUAL
+}
+
+enum Status {
+  PENDING
+  ACTIVE
+  FROZEN
+}
+
 model Subscriber {
   id             String   @id @default(cuid())
   phone          String
@@ -11,10 +33,7 @@ model Subscriber {
   expiresAt      DateTime?
   status         Status   @default(PENDING)
   telegramUserId String?  @db.VarChar(32)
-  discordUserId  String?  @db.VarChar(32)  // <— aggiunta
+  discordUserId  String?  @db.VarChar(32)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
-
-  @@index([discordUserId])
-  @@index([telegramUserId])
 }
