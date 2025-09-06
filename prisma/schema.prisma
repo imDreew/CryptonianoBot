@@ -1,23 +1,33 @@
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+generator client { provider = "prisma-client-js" }
 
-generator client {
-  provider = "prisma-client-js"
-}
+enum Plan { MONTHLY ANNUAL }
+enum Status { ACTIVE FROZEN }
 
 model Subscriber {
-  id           String   @id @default(cuid())
-  phone        String
-  telegramNick String
-  discordNick  String
-  bitgetUid    String
-  email        String   @unique
-  verifyCode   String   @unique   // <— codice di conferma
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id             String   @id @default(cuid())
+  phone          String
+  telegramNick   String
+  discordNick    String
+  bitgetUid      String
+  email          String   @unique
+  verifyCode     String   @unique
+
+  plan           Plan?
+  startDate      DateTime?
+  expiresAt      DateTime?
+  status         Status   @default(ACTIVE)
+
+  telegramUserId String?  @db.VarChar(32)
+  discordUserId  String?  @db.VarChar(32)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([telegramUserId])
+  @@index([discordUserId])
 }
+
 
 
 
