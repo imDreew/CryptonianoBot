@@ -1,45 +1,20 @@
-datasource db {
-provider = "postgresql"
-url = env("DATABASE_URL")
-}
-
-
-generator client {
-provider = "prisma-client-js"
-}
-
-
-enum Plan {
-MONTHLY
-ANNUAL
-}
-
-
-enum Status {
-PENDING // dati inseriti ma non ancora collegati ai bot
-ACTIVE // collegato e in corso di validità
-FROZEN // scaduto → bloccato su Discord/Telegram
-}
-
-
 model Subscriber {
-id String @id @default(cuid())
-phone String
-discordNick String?
-telegramNick String?
-bitgetUid String?
-email String @unique
-verifyCode String @unique
-plan Plan?
-startDate DateTime?
-expiresAt DateTime?
-status Status @default(PENDING)
-discordUserId String? @db.VarChar(32)
-telegramUserId String? @db.VarChar(32)
-createdAt DateTime @default(now())
-updatedAt DateTime @updatedAt
+  id             String   @id @default(cuid())
+  phone          String
+  discordNick    String?
+  telegramNick   String?
+  bitgetUid      String?
+  email          String   @unique
+  verifyCode     String   @unique
+  plan           Plan?
+  startDate      DateTime?
+  expiresAt      DateTime?
+  status         Status   @default(PENDING)
+  telegramUserId String?  @db.VarChar(32)
+  discordUserId  String?  @db.VarChar(32)  // <— aggiunta
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-
-@@index([discordUserId])
-@@index([telegramUserId])
+  @@index([discordUserId])
+  @@index([telegramUserId])
 }
