@@ -1,39 +1,23 @@
-// prisma/schema.prisma
-
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url      = env("DATABASE_URL") // INTERNAL Railway
 }
 
 generator client {
   provider = "prisma-client-js"
 }
 
-enum Plan {
-  MONTHLY
-  ANNUAL
-}
-
-enum Status {
-  PENDING
-  ACTIVE
-  FROZEN
-}
-
 model Subscriber {
-  id             String   @id @default(cuid())
-  phone          String
-  discordNick    String?
-  telegramNick   String?
-  bitgetUid      String?
-  email          String   @unique
-  verifyCode     String   @unique
-  plan           Plan?
-  startDate      DateTime?
-  expiresAt      DateTime?
-  status         Status   @default(PENDING)
-  telegramUserId String?  @db.VarChar(32)
-  discordUserId  String?  @db.VarChar(32)
+  id           String   @id @default(cuid())
+  phone        String
+  telegramNick String
+  discordNick  String
+  bitgetUid    String
+  email        String   @unique
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 }
