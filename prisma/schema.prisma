@@ -1,48 +1,48 @@
-// prisma/schema.prisma
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+generator client { provider = "prisma-client-js" }
 
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-generator client {
-  provider = "prisma-client-js"
-}
-
-enum Plan {
-  MONTHLY
-  ANNUAL
-}
-
-enum Status {
-  PENDING
-  ACTIVE
-  FROZEN
-}
+enum Plan        { MONTHLY QUARTERLY ANNUAL }
+enum Status      { PENDING ACTIVE FROZEN }
+enum PayMethod   { BANK PAYPAL USDT }
+enum UsdtNet     { TRC20 ERC20 BEP20 }
+enum EarlyTier   { NONE EA1 EA2 }
+enum TgSubType   { NONE LIFETIME SEMIANNUAL ANNUAL }
 
 model Subscriber {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   phone          String
   telegramNick   String
   discordNick    String
   bitgetUid      String
-  email          String   @unique
-  verifyCode     String   @unique
+  email          String    @unique
+  verifyCode     String    @unique
+
   plan           Plan?
   startDate      DateTime?
   expiresAt      DateTime?
-  status         Status   @default(PENDING)
-  telegramUserId String?  @db.VarChar(32)
-  discordUserId  String?  @db.VarChar(32)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  status         Status     @default(PENDING)
+
+  // Link account
+  telegramUserId String?    @db.VarChar(32)
+  discordUserId  String?    @db.VarChar(32)
+
+  // Pricing context
+  earlyTier      EarlyTier  @default(NONE)
+  tgSubType      TgSubType  @default(NONE)
+
+  // Payment proof
+  payMethod      PayMethod?
+  usdtNetwork    UsdtNet?
+  proofFileId    String?      // Telegram file_id dello screenshot
+  payFrom        String?      // IBAN/email/address mittente (in base al metodo)
+  payTo          String?      // IBAN/email/address destinatario (validato)
+  amount         Float?
+  amountCurrency String?      // "EUR" o "USDT"
+  paymentOk      Boolean      @default(false)
+
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
 
   @@index([telegramUserId])
   @@index([discordUserId])
 }
-
-
-
-
-
-
