@@ -109,3 +109,7 @@ export async function startDiscordBot(prisma, env) {
   return { freeze, unfreeze, createInvite };
 }
 
+
+  return { freeze, unfreeze, createInvite };
+}
+
