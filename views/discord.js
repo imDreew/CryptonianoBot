@@ -1,17 +1,18 @@
 // views/discord.js
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, GatewayIntentBits, PermissionFlagsBits } from 'discord.js';
 
 export async function startDiscordBot(prisma, env) {
   const {
     DISCORD_BOT_TOKEN,
     DISCORD_GUILD_ID,
     DISCORD_FROZEN_ROLE_ID,
-    DISCORD_ACTIVE_ROLE_ID
+    DISCORD_ACTIVE_ROLE_ID,
+    DISCORD_INVITE_CHANNEL_ID, // canale su cui creare inviti unici
   } = env;
 
   if (!DISCORD_BOT_TOKEN || !DISCORD_GUILD_ID) {
-    console.log('⚠️ Discord bot disabilitato: mancano DISCORD_BOT_TOKEN o DISCORD_GUILD_ID');
-    return { freeze: async () => false, unfreeze: async () => false };
+    console.log('⚠️ Discord bot disabilitato: manca DISCORD_BOT_TOKEN o DISCORD_GUILD_ID');
+    return { freeze: async () => false, unfreeze: async () => false, createInvite: async () => null };
   }
 
   const client = new Client({
@@ -19,13 +20,14 @@ export async function startDiscordBot(prisma, env) {
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMembers,
       GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent
+      GatewayIntentBits.MessageContent,
     ]
   });
 
   client.once('ready', () => console.log(`🤖 Discord bot online come ${client.user.tag}`));
+  client.once('clientReady', () => console.log(`🤖 Discord bot (clientReady) ${client.user.tag}`));
 
-  // !link <CODICE> per associare l'account
+  // !link <CODICE> → collega Discord all'abbonamento
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (!message.guild || message.guild.id !== DISCORD_GUILD_ID) return;
@@ -72,16 +74,38 @@ export async function startDiscordBot(prisma, env) {
   }
 
   async function unfreeze(discordUserId) {
-    if (!discordUserId || !DISCORD_FROZEN_ROLE_ID) return false;
     try {
+      if (!discordUserId) return false;
       const guild = await client.guilds.fetch(DISCORD_GUILD_ID);
       const member = await guild.members.fetch(discordUserId).catch(() => null);
       if (!member) return false;
-      await member.roles.remove(DISCORD_FROZEN_ROLE_ID).catch(() => {});
-      if (DISCORD_ACTIVE_ROLE_ID) await member.roles.add(DISCORD_ACTIVE_ROLE_ID).catch(() => {});
+      if (process.env.DISCORD_FROZEN_ROLE_ID) await member.roles.remove(DISCORD_FROZEN_ROLE_ID).catch(() => {});
+      if (process.env.DISCORD_ACTIVE_ROLE_ID) await member.roles.add(DISCORD_ACTIVE_ROLE_ID).catch(() => {});
       return true;
     } catch (e) { console.warn('unfreeze discord error', e.message || e); return false; }
   }
 
-  return { freeze, unfreeze };
+  async function createInvite() {
+    try {
+      const guild = await client.guilds.fetch(DISCORD_GUILD_ID);
+      const channelId = DISCORD_INVITE_CHANNEL_ID || (await guild.channels.fetch()).find(c => c?.isTextBased?.())?.id;
+      if (!channelId) return null;
+      const channel = await guild.channels.fetch(channelId);
+      if (!channel) return null;
+
+      // invito usa e getta (1 uso), senza scadenza temporale (puoi mettere maxAge)
+      const invite = await channel.createInvite({
+        maxUses: 1,
+        unique: true,
+        reason: 'Registrazione CRYPTONIANO VIP CLUB',
+      }, 'create invite');
+      return invite.url;
+    } catch (e) {
+      console.warn('createInvite error', e.message || e);
+      return null;
+    }
+  }
+
+  return { freeze, unfreeze, createInvite };
 }
+
