@@ -7,42 +7,73 @@ enum PayMethod   { BANK PAYPAL USDT }
 enum UsdtNet     { TRC20 ERC20 BEP20 }
 enum EarlyTier   { NONE EA1 EA2 }
 enum TgSubType   { NONE LIFETIME SEMIANNUAL ANNUAL }
+enum Target      { TELEGRAM DISCORD }
 
 model Subscriber {
-  id             String    @id @default(cuid())
-  phone          String
-  telegramNick   String
-  discordNick    String
-  bitgetUid      String
-  email          String    @unique
-  verifyCode     String    @unique
+  id               String    @id @default(cuid())
+  phone            String
+  telegramNick     String
+  discordNick      String
+  bitgetUid        String
+  email            String    @unique
+  verifyCode       String    @unique
 
-  plan           Plan?
-  startDate      DateTime?
-  expiresAt      DateTime?
-  status         Status     @default(PENDING)
+  // CONTEX: EARLY/Telegram
+  earlyTier        EarlyTier  @default(NONE)
+  tgSubType        TgSubType  @default(NONE)
 
-  // Link account
-  telegramUserId String?    @db.VarChar(32)
-  discordUserId  String?    @db.VarChar(32)
+  // ---- ABBONAMENTO DISCORD (dedicato) ----
+  discordPlan      Plan?
+  discordStartDate DateTime?
+  discordEndDate   DateTime?
+  status           Status     @default(PENDING)
+  discordUserId    String?    @db.VarChar(32)
 
-  // Pricing context
-  earlyTier      EarlyTier  @default(NONE)
-  tgSubType      TgSubType  @default(NONE)
+  // ---- ABBONAMENTO TELEGRAM (dedicato) ----
+  telegramStartDate DateTime?
+  telegramEndDate   DateTime?
+  telegramUserId    String?    @db.VarChar(32)
 
-  // Payment proof
-  payMethod      PayMethod?
-  usdtNetwork    UsdtNet?
-  proofFileId    String?      // Telegram file_id dello screenshot
-  payFrom        String?      // IBAN/email/address mittente (in base al metodo)
-  payTo          String?      // IBAN/email/address destinatario (validato)
-  amount         Float?
-  amountCurrency String?      // "EUR" o "USDT"
-  paymentOk      Boolean      @default(false)
+  // Pagamento ultimo (snapshot)
+  payMethod        PayMethod?
+  usdtNetwork      UsdtNet?
+  proofFileId      String?
+  payFrom          String?
+  payTo            String?
+  amount           Float?
+  amountCurrency   String?
 
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  payments         Payment[]
 
   @@index([telegramUserId])
   @@index([discordUserId])
+}
+
+model Payment {
+  id           String   @id @default(cuid())
+  subscriberId String?
+  subscriber   Subscriber? @relation(fields: [subscriberId], references: [id], onDelete: SetNull)
+
+  target       Target
+  method       PayMethod
+  usdtNetwork  UsdtNet?
+  fileId       String
+  fileLink     String?
+  rawText      String
+
+  fromField    String?
+  toField      String?
+  amount       Float?
+  currency     String?
+  paidAt       DateTime?
+
+  validDest    Boolean?
+  validAmount  Boolean?
+  expectedDest String?
+  expectedAmt  Float?
+
+  createdAt    DateTime @default(now())
 }
