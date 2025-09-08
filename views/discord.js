@@ -1,9 +1,6 @@
 // views/discord.js
-import { Client, GatewayIntentBits, Partials, PermissionsBitField } from 'discord.js';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
 
-/**
- * Avvia il bot Discord e restituisce le funzioni di supporto.
- */
 export async function startDiscordBot(prisma, env) {
   const client = new Client({
     intents: [
@@ -29,20 +26,22 @@ export async function startDiscordBot(prisma, env) {
 
   await client.login(TOKEN);
 
-  // ---- FUNZIONI ----
   async function createInviteAndSave(userId) {
     try {
       const guild = await client.guilds.fetch(GUILD_ID);
-      const channel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased());
+      const channel =
+        guild.systemChannel ||
+        guild.channels.cache.find(c => c.isTextBased()) ||
+        (await guild.channels.fetch()).find(c => c.isTextBased());
+
       if (!channel) return null;
 
       const invite = await channel.createInvite({
         maxUses: 1,
         unique: true,
-        maxAge: 60 * 60 * 24 // valido 24h
+        maxAge: 60 * 60 * 24 // 24h
       });
 
-      // salva sul db (puoi usare una tabella "Invite" o aggiungere campo su User)
       await prisma.invite.create({
         data: {
           userId,
@@ -65,8 +64,8 @@ export async function startDiscordBot(prisma, env) {
       const member = await guild.members.fetch(discordUserId);
       if (!member) return;
 
-      await member.roles.remove(ROLE_ACTIVE).catch(() => {});
-      await member.roles.add(ROLE_FROZEN).catch(() => {});
+      if (ROLE_ACTIVE) await member.roles.remove(ROLE_ACTIVE).catch(() => {});
+      if (ROLE_FROZEN) await member.roles.add(ROLE_FROZEN).catch(() => {});
       console.log(`❄️ Utente ${discordUserId} freezato`);
     } catch (err) {
       console.error('Errore freeze:', err);
@@ -80,8 +79,8 @@ export async function startDiscordBot(prisma, env) {
       const member = await guild.members.fetch(discordUserId);
       if (!member) return;
 
-      await member.roles.remove(ROLE_FROZEN).catch(() => {});
-      await member.roles.add(ROLE_ACTIVE).catch(() => {});
+      if (ROLE_FROZEN) await member.roles.remove(ROLE_FROZEN).catch(() => {});
+      if (ROLE_ACTIVE) await member.roles.add(ROLE_ACTIVE).catch(() => {});
       console.log(`🔥 Utente ${discordUserId} riattivato`);
     } catch (err) {
       console.error('Errore unfreeze:', err);
