@@ -1,6 +1,6 @@
 {
   "name": "subs-collector-bot",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "prestart": "npx prisma db push --accept-data-loss && npx prisma generate",
@@ -12,10 +12,11 @@
     "dotenv": "^16.4.5",
     "node-cron": "^3.0.3",
     "node-telegram-bot-api": "^0.66.0",
-    "prisma": "^5.22.0",
-    "tesseract.js": "^5.0.5"
+    "tesseract.js": "^4.1.1",
+    "prisma": "^5.22.0"
   }
 }
+
 
 
 
