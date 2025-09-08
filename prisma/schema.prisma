@@ -1,5 +1,13 @@
-datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
-generator client { provider = "prisma-client-js" }
+// prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
 
 enum Plan      { MONTHLY QUARTERLY ANNUAL }
 enum Status    { PENDING ACTIVE FROZEN }
@@ -8,54 +16,63 @@ enum UsdtNet   { TRC20 ERC20 BEP20 }
 enum Target    { TELEGRAM DISCORD }
 enum TgSub     { NONE LIFETIME SEMIANNUAL ANNUAL }
 
+model EarlyAccess {
+  id              String   @id @default(cuid())
+  telegramHandle  String   @unique // senza @, lowercase
+  phone           String?
+  email           String?
+  tier            String?  // EA1, EA2, ecc.
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([phone])
+  @@index([email])
+}
+
 model Subscriber {
-  id               String   @id @default(cuid())
+  id                 String   @id @default(cuid())
 
-  // Anagrafica
-  phone            String
-  telegramNick     String
-  discordNick      String
-  bitgetUid        String
-  email            String   @unique
-  verifyCode       String   @unique
+  phone              String
+  telegramNick       String
+  discordNick        String
+  bitgetUid          String
+  email              String   @unique
+  verifyCode         String   @unique
 
-  // Stato Discord
-  discordPlan      Plan?
-  discordStartDate DateTime?
-  discordEndDate   DateTime?
-  status           Status   @default(PENDING)
-  discordUserId    String?  @db.VarChar(32)
-  discordInviteCode String? // per tracciare quale invito è stato usato
+  discordPlan        Plan?
+  discordStartDate   DateTime?
+  discordEndDate     DateTime?
+  status             Status   @default(PENDING)
+  discordUserId      String?  @db.VarChar(32)
+  discordInviteCode  String?
 
-  // Stato Telegram (solo CRM, niente auto-freeze qui)
-  tgSub            TgSub    @default(NONE)
-  telegramStartDate DateTime?
-  telegramEndDate   DateTime?
-  telegramUserId    String?  @db.VarChar(32)
+  tgSub              TgSub    @default(NONE)
+  telegramStartDate  DateTime?
+  telegramEndDate    DateTime?
+  telegramUserId     String?  @db.VarChar(32)
 
-  // Flag Early Access (da nick Telegram)
-  isEarlyAccess    Boolean  @default(false)
+  isEarlyAccess      Boolean  @default(false)
 
-  // Ultimo pagamento (snapshot)
-  payMethod        PayMethod?
-  usdtNetwork      UsdtNet?
-  proofFileId      String?
-  payFrom          String?
-  payTo            String?
-  amount           Float?
-  amountCurrency   String?
+  payMethod          PayMethod?
+  usdtNetwork        UsdtNet?
+  proofFileId        String?
+  payFrom            String?
+  payTo              String?
+  amount             Float?
+  amountCurrency     String?
 
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
-  payments         Payment[]
+  payments           Payment[]
 
   @@index([telegramUserId])
   @@index([discordUserId])
 }
 
 model Payment {
-  id           String   @id @default(cuid())
+  id           String     @id @default(cuid())
   subscriberId String?
   subscriber   Subscriber? @relation(fields: [subscriberId], references: [id], onDelete: SetNull)
 
