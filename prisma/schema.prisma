@@ -59,6 +59,14 @@ model EarlyAccess {
   @@map("earlyaccess")                           // nome tabella reale
 }
 
+model Invite {
+  id      Int    @id @default(autoincrement())
+  userId  Int
+  code    String
+  url     String
+  user    User   @relation(fields: [userId], references: [id])
+}
+
 /* Pagamenti */
 model Payment {
   id             Int       @id @default(autoincrement())
