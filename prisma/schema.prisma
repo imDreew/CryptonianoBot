@@ -7,67 +7,61 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/* ---------- ENUM ---------- */
+// ==== ENUM ====
 enum Plan {
   MONTHLY
   QUARTERLY
   ANNUAL
 }
+
 enum Status {
   PENDING
   ACTIVE
   FROZEN
 }
+
 enum PayMethod {
   BANK
   PAYPAL
   USDT
 }
+
 enum UsdtNet {
   TRC20
   ERC20
   BEP20
 }
 
-/* ---------- MODELS ---------- */
+// ==== MODELS ====
 
-/* Tabella utenti della tua app (nome a piacere) */
+// Utenti della tua app
 model User {
   id             Int       @id @default(autoincrement())
   telegramUserId String    @unique
   telegramHandle String?   @unique
   discordUserId  String?
   phone          String?
-  email          String?
+  email          String?   @unique
   bitgetUid      String?
 
   payments       Payment[]
   subscriptions  Subscription[]
+  invites        Invite[]
 
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
-
-  @@map("users") // opzionale: cambia o rimuovi se la tabella si chiama già "User"
 }
 
-/* Mappa la TUA tabella già esistente: earlyaccess(nome, telegram_id, importo) */
+// Mappa la tabella esistente: earlyaccess(nome, telegram_id, importo)
 model EarlyAccess {
-  telegram_id String  @id @map("telegram_id")    // chiave primaria sulla colonna esistente
+  telegram_id String  @id @map("telegram_id")
   nome        String? @map("nome")
-  importo     Float?  @map("importo")           // se in DB è numeric/decimal puoi usare Decimal con @db.Decimal
+  importo     Float?  @map("importo")
 
-  @@map("earlyaccess")                           // nome tabella reale
+  @@map("earlyaccess")
 }
 
-model Invite {
-  id      Int    @id @default(autoincrement())
-  userId  Int
-  code    String
-  url     String
-  user    User   @relation(fields: [userId], references: [id])
-}
-
-/* Pagamenti */
+// Pagamenti ricevuti (audit)
 model Payment {
   id             Int       @id @default(autoincrement())
   user           User      @relation(fields: [userId], references: [id])
@@ -84,17 +78,15 @@ model Payment {
 
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
-
-  @@map("payments") // opzionale
 }
 
-/* Sottoscrizioni (telegram/discord) */
+// Sottoscrizioni (telegram/discord)
 model Subscription {
   id        Int      @id @default(autoincrement())
   user      User     @relation(fields: [userId], references: [id])
   userId    Int
 
-  type      String   // "telegram" | "discord"
+  type      String   // "discord" o "telegram"
   plan      Plan
   status    Status   @default(PENDING)
   startAt   DateTime
@@ -102,7 +94,18 @@ model Subscription {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
-  @@map("subscriptions") // opzionale
 }
+
+// Inviti Discord generati per utente
+model Invite {
+  id     Int    @id @default(autoincrement())
+  user   User   @relation(fields: [userId], references: [id])
+  userId Int
+
+  code   String @unique
+  url    String
+
+  createdAt DateTime @default(now())
+}
+
 
