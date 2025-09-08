@@ -1,99 +1,96 @@
 // prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-generator client {
-  provider = "prisma-client-js"
+// Enums
+enum Plan {
+  MONTHLY
+  QUARTERLY
+  ANNUAL
 }
 
-enum Plan      { MONTHLY QUARTERLY ANNUAL }
-enum Status    { PENDING ACTIVE FROZEN }
-enum PayMethod { BANK PAYPAL USDT }
-enum UsdtNet   { TRC20 ERC20 BEP20 }
-enum Target    { TELEGRAM DISCORD }
-enum TgSub     { NONE LIFETIME SEMIANNUAL ANNUAL }
+enum Status {
+  PENDING
+  ACTIVE
+  FROZEN
+}
 
-model EarlyAccess {
-  id              String   @id @default(cuid())
-  telegramHandle  String   @unique // senza @, lowercase
+enum PayMethod {
+  BANK
+  PAYPAL
+  USDT
+}
+
+enum UsdtNet {
+  TRC20
+  ERC20
+  BEP20
+}
+
+// Modelli
+model User {
+  id              Int       @id @default(autoincrement())
+  telegramUserId  String    @unique
+  telegramHandle  String?   @unique
+  discordUserId   String?
   phone           String?
   email           String?
-  tier            String?  // EA1, EA2, ecc.
-  notes           String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  bitgetUid       String?
+  earlyAccess     EarlyAccess? @relation(fields: [earlyAccessId], references: [id])
+  earlyAccessId   Int?
 
-  @@index([phone])
-  @@index([email])
+  payments        Payment[]
+  subscriptions   Subscription[]
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }
 
-model Subscriber {
-  id                 String   @id @default(cuid())
+model EarlyAccess {
+  id        Int     @id @default(autoincrement())
+  phone     String?
+  email     String?
+  telegram  String?
+  tier      String? // EA1, EA2
+  notes     String?
 
-  phone              String
-  telegramNick       String
-  discordNick        String
-  bitgetUid          String
-  email              String   @unique
-  verifyCode         String   @unique
-
-  discordPlan        Plan?
-  discordStartDate   DateTime?
-  discordEndDate     DateTime?
-  status             Status   @default(PENDING)
-  discordUserId      String?  @db.VarChar(32)
-  discordInviteCode  String?
-
-  tgSub              TgSub    @default(NONE)
-  telegramStartDate  DateTime?
-  telegramEndDate    DateTime?
-  telegramUserId     String?  @db.VarChar(32)
-
-  isEarlyAccess      Boolean  @default(false)
-
-  payMethod          PayMethod?
-  usdtNetwork        UsdtNet?
-  proofFileId        String?
-  payFrom            String?
-  payTo              String?
-  amount             Float?
-  amountCurrency     String?
-
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-
-  payments           Payment[]
-
-  @@index([telegramUserId])
-  @@index([discordUserId])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Payment {
-  id           String     @id @default(cuid())
-  subscriberId String?
-  subscriber   Subscriber? @relation(fields: [subscriberId], references: [id], onDelete: SetNull)
+  id             Int       @id @default(autoincrement())
+  user           User      @relation(fields: [userId], references: [id])
+  userId         Int
+  method         PayMethod
+  usdtNet        UsdtNet?
+  proofFileId    String?   // file Telegram
+  payFrom        String?
+  payTo          String?
+  amount         Float
+  amountCurrency String
+  paidAt         DateTime
 
-  target       Target
-  method       PayMethod
-  usdtNetwork  UsdtNet?
-  fileId       String
-  fileLink     String?
-  rawText      String
-
-  fromField    String?
-  toField      String?
-  amount       Float?
-  currency     String?
-  paidAt       DateTime?
-
-  validDest    Boolean?
-  validAmount  Boolean?
-  expectedDest String?
-  expectedAmt  Float?
-
-  createdAt    DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }
 
+model Subscription {
+  id             Int      @id @default(autoincrement())
+  user           User     @relation(fields: [userId], references: [id])
+  userId         Int
+  type           String   // telegram / discord
+  plan           Plan
+  status         Status   @default(PENDING)
+  startAt        DateTime
+  endAt          DateTime
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
