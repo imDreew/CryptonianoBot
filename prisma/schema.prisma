@@ -54,8 +54,8 @@ model User {
 
 // Mappa la tabella esistente: earlyaccess(nome, telegram_id, importo)
 model EarlyAccess {
-  id          Int     @id @default(autoincrement())  // resta la PK attuale
-  telegram_id String  @unique @map("telegram_id")
+  id          Int     @id @default(autoincrement())  // PK tecnica invariata
+  telegram_id String  @unique @map("telegram_id")    // UNIQUE su telegram_id
   nome        String? @map("nome")
   importo     Float?  @map("importo")
 
