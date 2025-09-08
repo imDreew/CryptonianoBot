@@ -7,7 +7,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/* ===== ENUM ===== */
+
 enum Plan {
   MONTHLY
   QUARTERLY
@@ -32,9 +32,9 @@ enum UsdtNet {
   BEP20
 }
 
-/* ===== MODELS ===== */
 
-// Utenti della tua app
+
+
 model User {
   id             Int       @id @default(autoincrement())
   telegramUserId String    @unique
@@ -52,8 +52,7 @@ model User {
   updatedAt      DateTime  @updatedAt
 }
 
-// Tabella esistente earlyaccess(nome, telegram_id, importo)
-// Manteniamo PK tecnica "id" e mettiamo UNIQUE su telegram_id per lookup veloce
+
 model EarlyAccess {
   id          Int     @id @default(autoincrement())
   telegram_id String  @unique @map("telegram_id")
@@ -63,7 +62,7 @@ model EarlyAccess {
   @@map("earlyaccess")
 }
 
-// Pagamenti ricevuti (audit)
+
 model Payment {
   id             Int       @id @default(autoincrement())
   user           User      @relation(fields: [userId], references: [id])
@@ -82,7 +81,7 @@ model Payment {
   updatedAt      DateTime  @updatedAt
 }
 
-// Sottoscrizioni (telegram/discord)
+
 model Subscription {
   id        Int      @id @default(autoincrement())
   user      User     @relation(fields: [userId], references: [id])
@@ -98,7 +97,7 @@ model Subscription {
   updatedAt DateTime @updatedAt
 }
 
-// Inviti Discord generati per utente
+
 model Invite {
   id        Int      @id @default(autoincrement())
   user      User     @relation(fields: [userId], references: [id])
