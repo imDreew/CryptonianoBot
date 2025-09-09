@@ -3,158 +3,151 @@ import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 import { PrismaClient } from '@prisma/client';
 import cron from 'node-cron';
-import { startDiscordBot } from './discord.js';
+import Tesseract from 'tesseract.js';
+import fetch from 'node-fetch';
 import http from 'node:http';
+import { startDiscordBot } from './discord.js';
 
-// ---------- Prisma ----------
 const prisma = new PrismaClient();
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const TZ = process.env.TZ || 'Europe/Rome';
 
-// ---------- ENV ----------
-const {
-  TELEGRAM_BOT_TOKEN,
-  TZ = 'Europe/Rome',
-} = process.env;
-
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error('❌ Missing TELEGRAM_BOT_TOKEN');
-  process.exit(1);
-}
-
-// ---------- Telegram ----------
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
-
-// disattiva eventuale webhook rimasto
-try {
-  await bot.deleteWebHook({ drop_pending_updates: false });
-  console.log('Telegram webhook disattivato (polling attivo).');
-} catch {}
-
-// log errori polling/webhook
-bot.on('polling_error', (err) => console.error('polling_error:', err?.message || err));
-bot.on('webhook_error', (err) => console.error('webhook_error:', err?.message || err));
-
-// ---------- Utils ----------
-const isPhone   = v => /^\+[1-9]\d{7,14}$/.test((v || '').trim());
+// ================= UTILS =================
+const isPhone = v => /^\+[1-9]\d{7,14}$/.test((v || '').trim());
+const isBitget = v => /^\d{10}$/.test((v || '').trim());
+const isEmail = v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((v || '').trim());
 const isTelegramHandleNoAt = v => /^[a-zA-Z0-9_]{5,32}$/.test((v || '').trim());
-const isBitget  = v => /^\d{10}$/.test((v || '').trim());
-const isEmail   = v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((v || '').trim());
 
 function addDuration(start, plan) {
   const d = new Date(start);
-  if (plan === 'MONTHLY')   d.setMonth(d.getMonth() + 1);
+  if (plan === 'MONTHLY') d.setMonth(d.getMonth() + 1);
   if (plan === 'QUARTERLY') d.setMonth(d.getMonth() + 3);
-  if (plan === 'ANNUAL')    d.setFullYear(d.getFullYear() + 1);
+  if (plan === 'ANNUAL') d.setFullYear(d.getFullYear() + 1);
   return d;
 }
 
-// Prezzi (non-EA)
-function priceTable(tgSubType) {
-  if (tgSubType === 'LIFETIME') {
-    return {
-      EUR:  { MONTHLY: 59, QUARTERLY: 169, ANNUAL: 608 },
-      USDT: { MONTHLY: 70, QUARTERLY: 198, ANNUAL: 714 }
-    };
-  }
-  if (tgSubType === 'SEMIANNUAL' || tgSubType === 'ANNUAL') {
-    return {
-      EUR:  { MONTHLY: 69, QUARTERLY: 199, ANNUAL: 699 },
-      USDT: { MONTHLY: 85, QUARTERLY: 234, ANNUAL: 819 }
-    };
-  }
-  return {
-    EUR:  { MONTHLY: 69, QUARTERLY: 199, ANNUAL: 699 },
+// Prezzi Discord
+const discordPrices = {
+  NORMAL: {
+    EUR: { MONTHLY: 69, QUARTERLY: 199, ANNUAL: 699 },
     USDT: { MONTHLY: 85, QUARTERLY: 234, ANNUAL: 819 }
-  };
-}
-
-// Renew helper
-async function renewDiscordSubscription(prisma, userId, plan, paidAt) {
-  const latest = await prisma.subscription.findFirst({
-    where:{ userId, type:'discord' },
-    orderBy:{ endAt:'desc' }
-  });
-  const baseStart=(latest && latest.endAt && latest.endAt>paidAt)? new Date(latest.endAt):new Date(paidAt);
-  const newEnd=addDuration(baseStart,plan);
-
-  if (latest && latest.endAt && latest.endAt>=paidAt){
-    const updated=await prisma.subscription.update({
-      where:{ id:latest.id },
-      data:{ plan,status:'ACTIVE',endAt:newEnd }
-    });
-    return { startAt:updated.startAt, endAt:updated.endAt, extended:true };
+  },
+  DISCOUNT: {
+    EUR: { MONTHLY: 59, QUARTERLY: 169, ANNUAL: 608 },
+    USDT: { MONTHLY: 70, QUARTERLY: 198, ANNUAL: 714 }
   }
-  const created=await prisma.subscription.create({
-    data:{ userId,type:'discord',plan,status:'ACTIVE',startAt:paidAt,endAt:addDuration(paidAt,plan) }
-  });
-  return { startAt:created.startAt, endAt:created.endAt, extended:false };
+};
+
+// Prezzi Telegram Lifetime
+const telegramLifetimePrices = { EUR: [399, 499], USDT: [580, 585] };
+
+// Destinatari validi
+const validRecipients = {
+  IBAN: ['BE76967156182995', 'LT943130010112907769'],
+  PAYPAL: ['jonny.cecchi@outlook.it'],
+  USDT: {
+    TRC20: process.env.USDT_TRC20 || '',
+    ERC20: process.env.USDT_ERC20 || '',
+    BEP20: process.env.USDT_BEP20 || ''
+  }
+};
+
+async function ocrTelegramFile(fileId) {
+  const file = await bot.getFile(fileId);
+  const url = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+  const resp = await fetch(url);
+  const buf = Buffer.from(await resp.arrayBuffer());
+  const { data } = await Tesseract.recognize(buf, 'eng+ita');
+  return data.text || '';
 }
 
-// ---------- Flow ----------
+function parsePaymentData(text) {
+  const amountMatches = text.match(/(\d+[.,]\d{2})/g) || [];
+  const amounts = amountMatches.map(v => parseFloat(v.replace(',', '.')));
+  const emails = (text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/g) || []).map(e => e.toLowerCase());
+  const ibans = text.match(/[A-Z]{2}\d{2}[A-Z0-9]{10,30}/g) || [];
+  return { amounts, emails, ibans, raw: text };
+}
+
+function closestUSDT(amount) {
+  return telegramLifetimePrices.USDT.reduce((a, b) => {
+    return Math.abs(b - amount) < Math.abs(a - amount) ? b : a;
+  });
+}
+
+// ================= FLOW =================
 const STEPS = [
-  'telegramNickNoAt',  // 1) username telegram senza @
-  'tgSub',             // 2) (solo non-EA) tipo abbonamento telegram
-  'phone',             // 3)
-  'discordNick',       // 4)
-  'bitgetUid',         // 5)
-  'email',             // 6)
-  'discordPlan',       // 7)
-  'payMethod',         // 8)
-  'payNetwork',        // 9)
-  'paymentProof'       // 10)
+  'telegramNickNoAt',
+  'tgSub',
+  'tgLifetimeProof',
+  'phone',
+  'discordNick',
+  'bitgetUid',
+  'email',
+  'discordPlan',
+  'payMethod',
+  'payNetwork',
+  'confirm',
+  'paymentProof'
 ];
 
 const PROMPT = {
-  warning: '⚠️ *ATTENZIONE!!* Compilare correttamente tutti i campi richiesti. Se verranno riscontrati errori il tuo account potrebbe essere *sospeso*!',
-  telegramNickNoAt: '✈️ Inserisci il tuo **username Telegram** (senza @).',
-  tgSub: '🤖 Seleziona il tuo abbonamento *Telegram*:',
-  phone: '📞 Inserisci il tuo **numero di telefono** con prefisso (+39...).',
-  discordNick: '🎮 Inserisci il tuo **nickname Discord**.',
-  bitgetUid: '🪪 Inserisci il tuo **UID Bitget** (10 cifre).',
-  email: '📧 Inserisci la tua **email**:',
-  discordPlan: '📦 Seleziona il **piano Discord**:',
-  payMethod: '💳 Seleziona il **metodo di pagamento**:',
-  payNetwork: '🌐 Seleziona la **rete USDT**:',
-  paymentProof: '🖼️ Invia lo **screenshot della ricevuta** come immagine.'
+  warning: '⚠️ *ATTENZIONE!!* Compilare correttamente tutti i campi. Errori = sospensione account!',
+  telegramNickNoAt: '✈️ Inserisci il tuo username Telegram (senza @)',
+  tgSub: '📦 Che tipo di abbonamento Telegram hai?',
+  tgLifetimeProof: '🖼️ Invia lo screenshot della ricevuta del pagamento Lifetime (399€/499€ o USDT equivalente)',
+  phone: '📞 Inserisci il tuo numero di telefono con prefisso internazionale (+39...)',
+  discordNick: '🎮 Inserisci il tuo nickname Discord',
+  bitgetUid: '🪪 Inserisci il tuo UID Bitget (10 cifre)',
+  email: '📧 Inserisci la tua email',
+  discordPlan: '📦 Seleziona il piano Discord',
+  payMethod: '💳 Seleziona il metodo di pagamento',
+  payNetwork: '🌐 Seleziona la rete USDT',
+  confirm: '📝 Confermi i dati inseriti?',
+  paymentProof: '🖼️ Invia lo screenshot della ricevuta del pagamento Discord'
 };
 
-const KB_TG = { reply_markup: { inline_keyboard: [[
-  { text:'Lifetime',   callback_data:'TGSUB:LIFETIME' },
-  { text:'Semestrale', callback_data:'TGSUB:SEMIANNUAL' },
-  { text:'Annuale',    callback_data:'TGSUB:ANNUAL' }
-]] }};
+const KB_TG = { reply_markup: { inline_keyboard: [
+  [{ text: 'Semestrale', callback_data: 'TGSUB:SEMIANNUAL' }],
+  [{ text: 'Annuale', callback_data: 'TGSUB:ANNUAL' }],
+  [{ text: 'Lifetime', callback_data: 'TGSUB:LIFETIME' }]
+]}};
 
-const KB_PLAN = { reply_markup: { inline_keyboard: [[
-  { text:'Mensile',     callback_data:'DPLAN:MONTHLY' },
-  { text:'Trimestrale', callback_data:'DPLAN:QUARTERLY' },
-  { text:'Annuale',     callback_data:'DPLAN:ANNUAL' }
-]] }};
+const KB_PLAN = { reply_markup: { inline_keyboard: [
+  [{ text: 'Mensile', callback_data: 'DPLAN:MONTHLY' }],
+  [{ text: 'Trimestrale', callback_data: 'DPLAN:QUARTERLY' }],
+  [{ text: 'Annuale', callback_data: 'DPLAN:ANNUAL' }]
+]}};
 
-const KB_PAY = { reply_markup: { inline_keyboard: [[
-  { text:'Bonifico', callback_data:'PAY:BANK' },
-  { text:'PayPal',   callback_data:'PAY:PAYPAL' },
-  { text:'USDT',     callback_data:'PAY:USDT' }
-]] }};
+const KB_PAY = { reply_markup: { inline_keyboard: [
+  [{ text: 'Bonifico', callback_data: 'PAY:BANK' }],
+  [{ text: 'PayPal', callback_data: 'PAY:PAYPAL' }],
+  [{ text: 'USDT', callback_data: 'PAY:USDT' }]
+]}};
 
-const KB_NET = { reply_markup: { inline_keyboard: [[
-  { text:'TRC20', callback_data:'NET:TRC20' },
-  { text:'ERC20', callback_data:'NET:ERC20' },
-  { text:'BEP20', callback_data:'NET:BEP20' }
-]] }};
+const KB_NET = { reply_markup: { inline_keyboard: [
+  [{ text: 'TRC20', callback_data: 'NET:TRC20' }],
+  [{ text: 'ERC20', callback_data: 'NET:ERC20' }],
+  [{ text: 'BEP20', callback_data: 'NET:BEP20' }]
+]}};
 
-const sessions=new Map();
+const KB_CONFIRM = { reply_markup: { inline_keyboard: [
+  [{ text: '✅ Confermo', callback_data: 'CONFIRM' }],
+  [{ text: '❌ Ricomincia', callback_data: 'RESTART' }]
+]}};
 
-function startFlow(chatId,user){
-  const name=user?.first_name||user?.username||'amico';
-  sessions.set(chatId,{ step:0, data:{ tgSub:'NONE' }, isEA:false });
-  bot.sendMessage(chatId, PROMPT.warning, { parse_mode:'Markdown' })
-    .then(()=> bot.sendMessage(chatId,`Ciao ${name}! 👋`,{parse_mode:'Markdown'}))
-    .then(()=> bot.sendMessage(chatId,PROMPT.telegramNickNoAt,{parse_mode:'Markdown'}));
+const sessions = new Map();
+
+// ================= START =================
+function startFlow(chatId, user) {
+  sessions.set(chatId, { step: 0, data: {}, hasLifetime: false });
+  bot.sendMessage(chatId, PROMPT.warning, { parse_mode: 'Markdown' })
+    .then(() => bot.sendMessage(chatId, PROMPT.telegramNickNoAt));
 }
 
-// /start compatibile con gruppi e payload
-bot.onText(/^\/start(?:@[\w_]+)?(?:\s+.*)?$/i, (m) => startFlow(m.chat.id, m.from));
+bot.onText(/^\/start/, (m) => startFlow(m.chat.id, m.from));
 
-// Callbacks (bottoni)
+// ================= CALLBACKS =================
 bot.on('callback_query', async (q) => {
   const chatId = q.message.chat.id;
   const s = sessions.get(chatId);
@@ -162,222 +155,193 @@ bot.on('callback_query', async (q) => {
 
   if (q.data?.startsWith('TGSUB:')) {
     s.data.tgSub = q.data.split(':')[1];
-    await bot.answerCallbackQuery(q.id, { text: `Telegram: ${s.data.tgSub}` });
-    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id });
+    if (s.data.tgSub === 'LIFETIME') {
+      s.step = STEPS.indexOf('tgLifetimeProof');
+      return bot.sendMessage(chatId, PROMPT.tgLifetimeProof);
+    }
     s.step = STEPS.indexOf('phone');
-    return bot.sendMessage(chatId, PROMPT.phone, { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, PROMPT.phone);
   }
 
   if (q.data?.startsWith('DPLAN:')) {
     s.data.discordPlan = q.data.split(':')[1];
-    await bot.answerCallbackQuery(q.id, { text: `Discord: ${s.data.discordPlan}` });
-    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id });
     s.step = STEPS.indexOf('payMethod');
-    return bot.sendMessage(chatId, PROMPT.payMethod, { ...KB_PAY, parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, PROMPT.payMethod, KB_PAY);
   }
 
   if (q.data?.startsWith('PAY:')) {
     s.data.payMethod = q.data.split(':')[1];
-    await bot.answerCallbackQuery(q.id, { text: `Metodo: ${s.data.payMethod}` });
-    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id });
     if (s.data.payMethod === 'USDT') {
       s.step = STEPS.indexOf('payNetwork');
-      return bot.sendMessage(chatId, PROMPT.payNetwork, { ...KB_NET, parse_mode: 'Markdown' });
+      return bot.sendMessage(chatId, PROMPT.payNetwork, KB_NET);
     }
-    s.step = STEPS.indexOf('paymentProof');
-    return bot.sendMessage(chatId, PROMPT.paymentProof, { parse_mode: 'Markdown' });
+    s.step = STEPS.indexOf('confirm');
+    return showConfirmation(chatId, s);
   }
 
   if (q.data?.startsWith('NET:')) {
     s.data.usdtNetwork = q.data.split(':')[1];
-    await bot.answerCallbackQuery(q.id, { text: `Rete: ${s.data.usdtNetwork}` });
-    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id });
+    s.step = STEPS.indexOf('confirm');
+    return showConfirmation(chatId, s);
+  }
+
+  if (q.data === 'CONFIRM') {
     s.step = STEPS.indexOf('paymentProof');
-    return bot.sendMessage(chatId, PROMPT.paymentProof, { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, PROMPT.paymentProof);
+  }
+  if (q.data === 'RESTART') {
+    sessions.delete(chatId);
+    return startFlow(chatId, q.from);
   }
 });
 
-// Messaggi testuali (nuovo ordine)
+// ================= MESSAGES =================
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
-  if (text.startsWith('/')) return;
   const s = sessions.get(chatId);
-  if (!s) return;
+  if (!s || text.startsWith('/')) return;
 
   const key = STEPS[s.step];
 
   if (key === 'telegramNickNoAt') {
-    if (!isTelegramHandleNoAt(text)) {
-      return bot.sendMessage(chatId, '⚠️ Username non valido. Usa solo lettere/numeri/_ (5–32), **senza @**.');
-    }
-    const handle = text.toLowerCase();
-    s.data.telegramNick = '@' + handle;
-
-    // Early Access lookup
-    const ea = await prisma.earlyAccess.findUnique({ where: { telegram_id: handle } }).catch(() => null);
-    s.isEA = !!ea;
-
-    if (s.isEA) {
-      // EARLY: salto a ricevuta (OCR fittizio)
-      s.data.discordPlan = 'ANNUAL';
-      s.step = STEPS.indexOf('paymentProof');
-      return bot.sendMessage(
-        chatId,
-        '🟡 *Early Access* rilevato.\n' +
-        '➡️ Invia ora lo **screenshot della ricevuta**. La conferma sarà automatica (controlli temporaneamente disattivati).',
-        { parse_mode: 'Markdown' }
-      );
-    }
-
+    if (!isTelegramHandleNoAt(text)) return bot.sendMessage(chatId, '⚠️ Username non valido.');
+    s.data.telegramNick = '@' + text.toLowerCase();
     s.step = STEPS.indexOf('tgSub');
-    return bot.sendMessage(chatId, PROMPT.tgSub, { ...KB_TG, parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, PROMPT.tgSub, KB_TG);
   }
-
   if (key === 'phone') {
-    if (!isPhone(text)) return bot.sendMessage(chatId, '⚠️ Numero non valido (+ prefisso, 8–15 cifre).');
+    if (!isPhone(text)) return bot.sendMessage(chatId, '⚠️ Numero non valido.');
     s.data.phone = text;
     s.step++;
-    return bot.sendMessage(chatId, PROMPT.discordNick, { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, PROMPT.discordNick);
   }
-
   if (key === 'discordNick') {
     s.data.discordNick = text;
     s.step++;
-    return bot.sendMessage(chatId, PROMPT.bitgetUid, { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, PROMPT.bitgetUid);
   }
-
   if (key === 'bitgetUid') {
-    if (!isBitget(text)) return bot.sendMessage(chatId, '⚠️ UID Bitget non valido (10 cifre).');
+    if (!isBitget(text)) return bot.sendMessage(chatId, '⚠️ UID non valido.');
     s.data.bitgetUid = text;
     s.step++;
-    return bot.sendMessage(chatId, PROMPT.email, { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, PROMPT.email);
   }
-
   if (key === 'email') {
     if (!isEmail(text)) return bot.sendMessage(chatId, '⚠️ Email non valida.');
     s.data.email = text;
     s.step = STEPS.indexOf('discordPlan');
-    return bot.sendMessage(chatId, PROMPT.discordPlan, { ...KB_PLAN, parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, PROMPT.discordPlan, KB_PLAN);
   }
 });
 
-// Ricevuta (OCR FALSO: accetta sempre, genera pagamento + (ri)attiva abbonamento)
+// ================= PHOTOS =================
 bot.on('photo', async (msg) => {
   const chatId = msg.chat.id;
   const s = sessions.get(chatId);
-  if (!s || STEPS[s.step] !== 'paymentProof') return;
+  if (!s) return;
+  const key = STEPS[s.step];
+  const photo = msg.photo?.[msg.photo.length - 1];
+  if (!photo?.file_id) return;
 
-  try {
-    const photo = msg.photo?.[msg.photo.length - 1];
-    if (!photo?.file_id) {
-      return bot.sendMessage(chatId, '⚠️ Invia lo *screenshot come immagine*, non come file.', { parse_mode: 'Markdown' });
+  // OCR Lifetime Telegram
+  if (key === 'tgLifetimeProof') {
+    const text = await ocrTelegramFile(photo.file_id);
+    const { amounts } = parsePaymentData(text);
+    const validEUR = amounts.some(a => telegramLifetimePrices.EUR.includes(Math.round(a)));
+    const validUSDT = amounts.some(a => Math.abs(closestUSDT(a) - a) <= 5);
+    if (!validEUR && !validUSDT) {
+      return bot.sendMessage(chatId, '❌ Ricevuta non valida. Lifetime 399€/499€ o equivalente USDT richiesto.');
     }
+    s.hasLifetime = true;
+    s.step = STEPS.indexOf('phone');
+    return bot.sendMessage(chatId, PROMPT.phone);
+  }
 
-    // === OCR Fittizio: saltiamo qualsiasi analisi e accettiamo sempre ===
-    const paidAt = new Date();
-
-    // Determina piano e importo “atteso” in base al percorso
-    let plan = s.data.discordPlan || 'ANNUAL';
-    let method = s.data.payMethod || (s.isEA ? 'BANK' : 'BANK');
-    let currency = method === 'USDT' ? 'USDT' : 'EUR';
-    let amount = 0;
-
-    if (s.isEA) {
-      // EARLY: fisso 499 EUR
-      plan = 'ANNUAL';
-      currency = 'EUR';
-      amount = 499;
-    } else {
-      const tbl = priceTable(s.data.tgSub || 'ANNUAL'); // default fallback
-      amount = tbl[currency][plan];
-    }
-
-    // Upsert utente (EA potrebbe non avere email: uso placeholder)
-    const emailForUpsert = s.data.email || `${chatId}@placeholder.local`;
-    const user = await prisma.user.upsert({
-      where: { email: emailForUpsert },
-      update: {
-        telegramHandle: s.data.telegramNick,
-        phone: s.data.phone || null,
-        bitgetUid: s.data.bitgetUid || null
-      },
-      create: {
-        telegramUserId: chatId.toString(),
-        telegramHandle: s.data.telegramNick,
-        phone: s.data.phone || null,
-        email: emailForUpsert,
-        bitgetUid: s.data.bitgetUid || null
+  // OCR Discord payment
+  if (key === 'paymentProof') {
+    // 🔒 Controllo rinnovi
+    const user = await prisma.user.findUnique({ where: { telegramUserId: String(chatId) } });
+    if (user) {
+      const sub = await prisma.subscription.findFirst({
+        where: { userId: user.id, type: 'DISCORD' },
+        orderBy: { endAt: 'desc' }
+      });
+      if (sub && sub.endAt) {
+        const now = new Date();
+        const diffDays = Math.ceil((sub.endAt - now) / (1000 * 60 * 60 * 24));
+        if (diffDays > 7) {
+          return bot.sendMessage(chatId,
+            `⚠️ Abbonamento attivo fino al ${sub.endAt.toISOString().slice(0,10)}.\n` +
+            `Puoi rinnovare solo 7 giorni prima della scadenza.`);
+        }
       }
-    });
+    }
 
-    // Payment audit (dati minimi; i campi payFrom/payTo restano null in questa fase fittizia)
-    await prisma.payment.create({
+    const text = await ocrTelegramFile(photo.file_id);
+    const { amounts, emails, ibans } = parsePaymentData(text);
+
+    // check recipient
+    const validRecipient = ibans.some(i => validRecipients.IBAN.includes(i.replace(/\s/g,''))) ||
+                           emails.some(e => validRecipients.PAYPAL.includes(e));
+    if (!validRecipient) {
+      return bot.sendMessage(chatId, '❌ Destinatario non valido.');
+    }
+
+    // importo atteso
+    const plan = s.data.discordPlan;
+    const mode = s.hasLifetime ? 'DISCOUNT' : 'NORMAL';
+    const payCurrency = (s.data.payMethod === 'USDT') ? 'USDT' : 'EUR';
+    const expected = discordPrices[mode][payCurrency][plan];
+    const ok = amounts.some(a => Math.abs(a - expected) <= 5);
+
+    if (!ok) return bot.sendMessage(chatId, `❌ Importo non corrisponde al piano scelto (${expected} ${payCurrency}).`);
+
+    // salva DB
+    const start = new Date();
+    const end = addDuration(start, plan);
+    const userData = {
+      telegramUserId: String(chatId),
+      telegramHandle: s.data.telegramNick,
+      discordUserId: s.data.discordNick,
+      bitgetUid: s.data.bitgetUid,
+      email: s.data.email
+    };
+    const userSaved = await prisma.user.upsert({
+      where: { telegramUserId: String(chatId) },
+      update: userData,
+      create: userData
+    });
+    await prisma.subscription.create({
       data: {
-        userId: user.id,
-        method,
-        usdtNet: s.data.usdtNetwork || null,
-        proofFileId: photo.file_id,
-        payFrom: null,
-        payTo: null,
-        amount,
-        amountCurrency: currency,
-        paidAt
+        userId: userSaved.id,
+        type: 'DISCORD',
+        plan,
+        startAt: start,
+        endAt: end
       }
     });
 
-    // Crea o rinnova subscription
-    const { startAt: subStart, endAt: subEnd, extended } =
-      await renewDiscordSubscription(prisma, user.id, plan, paidAt);
-
-    // Invito Discord
-    const inviteUrl = await discord.createInviteAndSave?.(user.id);
-    await bot.sendMessage(
-      chatId,
-      `✅ Ricevuta ricevuta.\n` +
-      `*(Verifica automatica temporanea: accettata)*\n\n` +
-      (extended ? '🔁 Rinnovo effettuato.\n' : '🆕 Nuova attivazione.\n') +
-      `Piano: *${plan}* — Inizio: *${subStart.toISOString().slice(0, 10)}* — Fine: *${subEnd.toISOString().slice(0, 10)}*\n` +
-      (inviteUrl ? `🔗 Entra su Discord: ${inviteUrl}` : '⚠️ Invito non generato, contatta il supporto.'),
-      { parse_mode: 'Markdown' }
-    );
-
+    bot.sendMessage(chatId, `✅ Pagamento verificato.\nPiano ${plan}, attivo fino al ${end.toISOString().slice(0,10)}`);
     sessions.delete(chatId);
-  } catch (e) {
-    console.error('payment/fake-ocr error', e);
-    await bot.sendMessage(chatId, '❌ Errore imprevisto. Riprova a inviare lo screenshot.', { parse_mode: 'Markdown' });
   }
 });
 
-// ---------- Discord + CRON ----------
-const discord = await startDiscordBot(prisma, process.env);
+// ================= CONFIRMATION =================
+function showConfirmation(chatId, s) {
+  const msg = `📝 Riepilogo:\nTelegram: ${s.data.telegramNick}\nTel: ${s.data.phone}\nDiscord: ${s.data.discordNick}\nUID: ${s.data.bitgetUid}\nEmail: ${s.data.email}\nPiano Discord: ${s.data.discordPlan}\nMetodo: ${s.data.payMethod}${s.data.usdtNetwork ? ' ('+s.data.usdtNetwork+')' : ''}`;
+  return bot.sendMessage(chatId, msg, KB_CONFIRM);
+}
 
-// Ogni giorno alle 12:00 Europe/Rome → freeze/unfreeze in base alla sub più recente
+// ================= CRON =================
 cron.schedule('0 12 * * *', async () => {
-  const now = new Date();
-  const latestPerUser = await prisma.subscription.groupBy({
-    by: ['userId'],
-    _max: { endAt: true }
-  });
-
-  for (const row of latestPerUser) {
-    const last = await prisma.subscription.findFirst({
-      where: { userId: row.userId, type: 'discord' },
-      orderBy: { endAt: 'desc' },
-      include: { user: true }
-    });
-    if (!last) continue;
-
-    if (last.status === 'ACTIVE' && last.endAt < now) {
-      try { await discord.freeze?.(last.user?.discordUserId); } catch {}
-      await prisma.subscription.update({ where: { id: last.id }, data: { status: 'FROZEN' } });
-    } else if (last.status === 'FROZEN' && last.endAt >= now) {
-      try { await discord.unfreeze?.(last.user?.discordUserId); } catch {}
-      await prisma.subscription.update({ where: { id: last.id }, data: { status: 'ACTIVE' } });
-    }
-  }
+  console.log('Daily check subscriptions...');
 }, { timezone: TZ });
 
-// ---------- Health ----------
+// ================= DISCORD =================
+const discord = await startDiscordBot(prisma, process.env);
+
+// ================= HEALTH =================
 http.createServer((_,res)=>{res.writeHead(200);res.end('OK');})
   .listen(process.env.PORT||3000,()=>console.log('Health server on /'));
+
