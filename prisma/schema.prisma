@@ -7,7 +7,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/* ===== ENUM ===== */
+
 
 enum Plan {
   MONTHLY
@@ -46,7 +46,7 @@ enum Service {
   DISCORD
 }
 
-/* ===== MODELS ===== */
+
 
 model User {
   id             Int            @id @default(autoincrement())
