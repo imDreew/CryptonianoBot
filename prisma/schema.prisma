@@ -73,7 +73,7 @@ model Payment {
   user             User           @relation(fields: [userId], references: [id])
   userId           Int
 
-  service          Service
+  service          Service?       // ← TEMP: opzionale per poter aggiungere la colonna
   method           PayMethod
   usdtNet          UsdtNet?
 
@@ -86,19 +86,20 @@ model Payment {
 
   payFrom          String?
   payTo            String?
-  amount           Float
-  amountCurrency   String
-  paidAt           DateTime
+  amount          Float
+  amountCurrency  String
+  paidAt          DateTime
 
-  status           PaymentStatus  @default(PENDING_REVIEW)
-  reviewerId       String?
-  reviewNotes      String?
+  status          PaymentStatus   @default(PENDING_REVIEW)
+  reviewerId      String?
+  reviewNotes     String?
 
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 
   @@index([userId, service, status, paidAt])
 }
+
 
 model Subscription {
   id        Int      @id @default(autoincrement())
