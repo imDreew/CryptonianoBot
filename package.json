@@ -8,14 +8,17 @@
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
+    "cron": "^3.1.7",
     "discord.js": "^14.15.3",
     "dotenv": "^16.4.5",
-    "node-cron": "^3.0.3",
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
     "node-telegram-bot-api": "^0.66.0",
-    "tesseract.js": "^4.1.1",
+    "tesseract.js": "^5.1.1",
     "prisma": "^5.22.0"
   }
 }
+
 
 
 
