@@ -7,7 +7,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/* ===== Enums ===== */
+/* ===== ENUM ===== */
 
 enum Plan {
   MONTHLY
@@ -46,23 +46,23 @@ enum Service {
   DISCORD
 }
 
-/* ===== Models ===== */
+/* ===== MODELS ===== */
 
 model User {
-  id              Int             @id @default(autoincrement())
-  telegramUserId  String          @unique
-  telegramHandle  String?         @unique
-  discordUserId   String?
-  phone           String?
-  email           String?         @unique
-  bitgetUid       String?
+  id             Int            @id @default(autoincrement())
+  telegramUserId String         @unique
+  telegramHandle String?        @unique
+  discordUserId  String?
+  phone          String?
+  email          String?        @unique
+  bitgetUid      String?
 
-  payments        Payment[]
-  subscriptions   Subscription[]
-  invites         Invite[]
+  payments       Payment[]
+  subscriptions  Subscription[]
+  invites        Invite[]
 
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
   @@index([email])
   @@index([telegramHandle])
@@ -76,6 +76,7 @@ model Payment {
   service          Service
   method           PayMethod
   usdtNet          UsdtNet?
+
   proofFileId      String?
   proofFileUid     String?
   proofHash        String?        @unique
@@ -100,20 +101,20 @@ model Payment {
 }
 
 model Subscription {
-  id        Int       @id @default(autoincrement())
-  user      User      @relation(fields: [userId], references: [id])
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id])
   userId    Int
 
-  // String per compatibilità con DB esistente
-  type      String    @db.VarChar(16) // "DISCORD" | "TELEGRAM"
+  // String per compatibilità e semplicità di migrazione
+  type      String   @db.VarChar(16) // "DISCORD" | "TELEGRAM"
   plan      Plan
-  status    Status    @default(ACTIVE)
+  status    Status   @default(ACTIVE)
 
   startAt   DateTime
   endAt     DateTime
 
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([userId, type, endAt])
 }
@@ -122,10 +123,8 @@ model Invite {
   id        Int      @id @default(autoincrement())
   user      User     @relation(fields: [userId], references: [id])
   userId    Int
-
   code      String   @unique
   url       String
-
   createdAt DateTime @default(now())
 }
 
