@@ -46,7 +46,7 @@ const KB_BACK = { reply_markup: { inline_keyboard: [[{ text: '⬅️ INDIETRO', 
 const KB_DC = {
   reply_markup: {
     inline_keyboard: [
-      [{ text: 'Non hai Discord?', callback_data: 'NO_DISCORD' }],
+      [{ text: '🆕 Non hai Discord?', callback_data: 'NO_DISCORD' }],
       [{ text: '⬅️ INDIETRO', callback_data: 'BACK' }]
     ]
   }
@@ -56,7 +56,7 @@ const KB_DC = {
 const KB_BG = {
   reply_markup: {
     inline_keyboard: [
-      [{ text: 'Non ho Bitget', callback_data: 'NO_BITGET' }],
+      [{ text: '🆕 Non ho Bitget', callback_data: 'NO_BITGET' }],
       [{ text: '⬅️ INDIETRO', callback_data: 'BACK' }]
     ]
   }
@@ -65,10 +65,10 @@ const KB_BG = {
 const KB_PLAN = {
   reply_markup: {
     inline_keyboard: [
-      [{ text: 'Mensile',     callback_data: 'PLAN:MONTHLY' }],
-      [{ text: 'Trimestrale', callback_data: 'PLAN:QUARTERLY' }],
-      [{ text: 'Annuale',     callback_data: 'PLAN:ANNUAL' }],
-      [{ text: '⬅️ INDIETRO', callback_data: 'BACK' }]
+      [{ text: '📅 Mensile',     callback_data: 'PLAN:MONTHLY' }],
+      [{ text: '📆 Trimestrale', callback_data: 'PLAN:QUARTERLY' }],
+      [{ text: '📜 Annuale',     callback_data: 'PLAN:ANNUAL' }],
+      [{ text: '⬅️ INDIETRO',    callback_data: 'BACK' }]
     ]
   }
 };
@@ -76,10 +76,12 @@ const KB_PLAN = {
 const KB_PAYMENT = {
   reply_markup: {
     inline_keyboard: [
-      [{ text: 'Bonifico Bancario', callback_data: 'PAY:BANK_TRANSFER' }],
-      [{ text: 'PayPal',            callback_data: 'PAY:PAYPAL' }],
-      [{ text: 'Transfer USDT',     callback_data: 'PAY:USDT_TRANSFER' }],
-      [{ text: '⬅️ INDIETRO',       callback_data: 'BACK' }]
+      [{ text: '🏦 Bonifico',         callback_data: 'PAY:BANK_TRANSFER' }],
+      [{ text: '💸 PayPal',           callback_data: 'PAY:PAYPAL' }],
+      [{ text: '🟡 USDT (BEP20)',     callback_data: 'PAY:USDT_BEP20' }],
+      [{ text: '🟠 USDT (ERC20)',     callback_data: 'PAY:USDT_ERC20' }],
+      [{ text: '🔵 USDT (TRC20)',     callback_data: 'PAY:USDT_TRC20' }],
+      [{ text: '⬅️ INDIETRO',         callback_data: 'BACK' }]
     ]
   }
 };
@@ -114,9 +116,11 @@ function planHuman(plan) {
     : plan;
 }
 function paymentHuman(pm) {
-  return pm === 'BANK_TRANSFER' ? 'Bonifico Bancario'
+  return pm === 'BANK_TRANSFER' ? 'Bonifico'
     : pm === 'PAYPAL' ? 'PayPal'
-    : pm === 'USDT_TRANSFER' ? 'Transfer USDT'
+    : pm === 'USDT_BEP20' ? 'USDT (BEP20)'
+    : pm === 'USDT_ERC20' ? 'USDT (ERC20)'
+    : pm === 'USDT_TRC20' ? 'USDT (TRC20)'
     : pm;
 }
 function planDurationDays(plan) {
@@ -160,15 +164,15 @@ function buildFinalSummary(record, data) {
   const expiry = fmtDateTime(ends);
   return [
     '✅ *Riepilogo dati*',
-    `• Nick Telegram: ${data.telegramNick}`,
-    `• Nick Discord: ${data.discordNick}`,
-    `• UID Bitget: ${data.bitgetUID}`,
-    `• Email: ${data.email}`,
-    `• Telefono: ${data.phoneCountryCode} ${data.phoneNumber}`,
-    `• Abbonamento Discord: ${planHuman(data.plan)}`,
-    `• Metodo di pagamento: ${paymentHuman(data.payment)}`,
-    `• Registrazione: ${when}`,
-    `• Scadenza stimata: ${expiry}`,
+    `• 📨 Nick Telegram: *${data.telegramNick}*`,
+    `• 🕹️ Nick Discord: *${data.discordNick}*`,
+    `• 🆔 UID Bitget: *${data.bitgetUID}*`,
+    `• ✉️ Email: *${data.email}*`,
+    `• 📱 Telefono: *${data.phoneCountryCode} ${data.phoneNumber}*`,
+    `• 🏷️ Abbonamento Discord: *${planHuman(data.plan)}*`,
+    `• 💳 Metodo di pagamento: *${paymentHuman(data.payment)}*`,
+    `• 🕒 Registrazione: *${when}*`,
+    `• ⏰ Scadenza stimata: *${expiry}*`,
     '',
     '➡️ *Invia questo messaggio direttamente a **Jonny** in chat privata.*'
   ].join('\n');
@@ -176,11 +180,11 @@ function buildFinalSummary(record, data) {
 
 /* ================== FLOW HELPERS ================== */
 const STEPS_TEXT = {
-  TG_NICK: '1/7 — Inviami il tuo **nick Telegram** (con o senza @).',
-  DC_NICK: '2/7 — Inviami il tuo **nick Discord** (come appare su Discord).',
-  BITGET:  '3/7 — Inviami il tuo **UID Bitget** (solo cifre).',
-  EMAIL:   '4/7 — Inviami la tua **email**.',
-  PHONE:   '5/7 — Inviami il tuo **numero di telefono con prefisso internazionale**.\nEsempi: `+39 3331234567`, `+41 765432109`'
+  TG_NICK: '👋 *Benvenuto!*\n\n*1/7* — Inviami il tuo **nick Telegram** (con o senza @).',
+  DC_NICK: '🎮 *2/7* — Inviami il tuo **nick Discord** (come appare su Discord).',
+  BITGET:  '🏦 *3/7* — Inviami il tuo **UID Bitget** (solo cifre).',
+  EMAIL:   '✉️ *4/7* — Inviami la tua **email**.',
+  PHONE:   '📞 *5/7* — Inviami il tuo **numero di telefono con prefisso internazionale**.\nEsempi: `+39 3331234567`, `+41 765432109`'
 };
 
 function getOrCreateSession(chatId) {
@@ -192,7 +196,7 @@ async function askStep(chatId, step) {
   const s = getOrCreateSession(chatId);
   s.step = step;
 
-  // Per ogni step (tranne il primo) mostriamo il bottone INDIETRO
+  // Per ogni step (tranne il primo) mostriamo il bottone INDIETRO; per Discord/Bitget anche i bottoni di aiuto
   if (step === STEPS.TG_NICK) {
     await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown' });
   } else if (step === STEPS.DC_NICK) {
@@ -204,7 +208,6 @@ async function askStep(chatId, step) {
   } else if (step === STEPS.PHONE) {
     await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_BACK.reply_markup });
   } else {
-    // per sicurezza, default con back
     await bot.sendMessage(chatId, STEPS_TEXT[step] || 'Procedi.', { parse_mode: 'Markdown', reply_markup: KB_BACK.reply_markup });
   }
 }
@@ -217,8 +220,7 @@ bot.onText(/^\/start$/i, async (msg) => {
 
   if (await existsTelegramUserId(s.data.telegramUserId)) {
     await bot.sendMessage(chatId,
-      '⚠️ Risulta già una registrazione associata al tuo account Telegram. ' +
-      'Se pensi sia un errore, contatta **Jonny** in privato.',
+      '⚠️ *Attenzione*: risulta già una registrazione associata al tuo account Telegram.\nSe pensi sia un errore, contatta **Jonny** in privato.',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -229,7 +231,7 @@ bot.onText(/^\/start$/i, async (msg) => {
 bot.onText(/^\/restart$/i, async (msg) => {
   const chatId = msg.chat.id;
   sessions.delete(chatId);
-  await bot.sendMessage(chatId, '🔁 Flusso azzerato.');
+  await bot.sendMessage(chatId, '🔁 *Flusso azzerato.*\nRipartiamo da capo!', { parse_mode: 'Markdown' });
   await askStep(chatId, STEPS.TG_NICK);
 });
 
@@ -248,8 +250,7 @@ bot.on('message', async (msg) => {
       case STEPS.TG_NICK: {
         if (!isValidTelegramNick(text)) {
           await bot.sendMessage(chatId,
-            '❌ Nick Telegram non valido. Deve essere 5–32 caratteri alfanumerici/underscore, con o senza @.\n' +
-            'Esempi validi: `@crypto_user`, `crypto_user`',
+            '❌ *Nick Telegram non valido.*\nDeve essere 5–32 caratteri alfanumerici/underscore, con o senza @.\nEsempi: `@crypto_user`, `crypto_user`',
             { parse_mode: 'Markdown' }
           );
           return;
@@ -257,7 +258,7 @@ bot.on('message', async (msg) => {
         const nickNorm = normTelegramNick(text);
         if (await existsTelegramNick(nickNorm)) {
           await bot.sendMessage(chatId,
-            '⚠️ Questo nick Telegram risulta già registrato. Inserisci un nick diverso oppure contatta **Jonny**.',
+            '⚠️ Questo *nick Telegram* risulta già registrato. Inserisci un nick diverso oppure contatta **Jonny**.',
             { parse_mode: 'Markdown' }
           );
           return;
@@ -270,14 +271,15 @@ bot.on('message', async (msg) => {
       case STEPS.DC_NICK: {
         if (!isValidDiscordNick(text)) {
           await bot.sendMessage(chatId,
-            '❌ Nick Discord non valido. Usa 2–32 caratteri (lettere, numeri, punto, trattino, underscore).'
+            '❌ *Nick Discord non valido.* Usa 2–32 caratteri (lettere, numeri, punto, trattino, underscore).',
+            { parse_mode: 'Markdown' }
           );
           return;
         }
         const nickNorm = normDiscordNick(text);
         if (await existsDiscordNick(nickNorm)) {
           await bot.sendMessage(chatId,
-            '⚠️ Questo nick Discord risulta già registrato. Inserisci un nick diverso oppure contatta **Jonny**.',
+            '⚠️ Questo *nick Discord* risulta già registrato. Inserisci un nick diverso oppure contatta **Jonny**.',
             { parse_mode: 'Markdown' }
           );
           return;
@@ -289,12 +291,12 @@ bot.on('message', async (msg) => {
 
       case STEPS.BITGET: {
         if (!isValidBitgetUID(text)) {
-          await bot.sendMessage(chatId, '❌ UID Bitget non valido. Inserisci solo cifre (5–20).');
+          await bot.sendMessage(chatId, '❌ *UID Bitget non valido.* Inserisci solo cifre (5–20).', { parse_mode: 'Markdown' });
           return;
         }
         if (await existsBitgetUID(text)) {
           await bot.sendMessage(chatId,
-            '⚠️ Questo UID Bitget risulta già registrato. Verifica e reinserisci, oppure contatta **Jonny**.',
+            '⚠️ Questo *UID Bitget* risulta già registrato. Verifica e reinserisci, oppure contatta **Jonny**.',
             { parse_mode: 'Markdown' }
           );
           return;
@@ -306,13 +308,13 @@ bot.on('message', async (msg) => {
 
       case STEPS.EMAIL: {
         if (!isValidEmailFmt(text)) {
-          await bot.sendMessage(chatId, '❌ Email non valida. Esempio: `nome@dominio.it`', { parse_mode: 'Markdown' });
+          await bot.sendMessage(chatId, '❌ *Email non valida.* Esempio: `nome@dominio.it`', { parse_mode: 'Markdown' });
           return;
         }
         const emailNorm = normEmail(text);
         if (await existsEmail(emailNorm)) {
           await bot.sendMessage(chatId,
-            '⚠️ Questa email risulta già registrata. Usa un’altra email o contatta **Jonny**.',
+            '⚠️ *Email* già registrata. Usa un’altra email o contatta **Jonny**.',
             { parse_mode: 'Markdown' }
           );
           return;
@@ -326,15 +328,14 @@ bot.on('message', async (msg) => {
         const parsed = parsePhoneWithPrefix(text);
         if (!parsed) {
           await bot.sendMessage(chatId,
-            '❌ Numero non valido. Usa il formato **internazionale** con prefisso “+”.\n' +
-            'Esempi validi: `+39 3331234567`, `+41 765432109`',
+            '❌ *Numero non valido.* Usa il formato **internazionale** con prefisso “+”.\nEsempi: `+39 3331234567`, `+41 765432109`',
             { parse_mode: 'Markdown' }
           );
           return;
         }
         if (await existsPhone(parsed.country, parsed.number)) {
           await bot.sendMessage(chatId,
-            '⚠️ Questo numero di telefono risulta già registrato. Inserisci un altro numero o contatta **Jonny**.',
+            '⚠️ *Numero di telefono* già registrato. Inserisci un altro numero o contatta **Jonny**.',
             { parse_mode: 'Markdown' }
           );
           return;
@@ -349,7 +350,7 @@ bot.on('message', async (msg) => {
     }
   } catch (err) {
     console.error('flow_error', err);
-    await bot.sendMessage(chatId, '⚠️ Errore temporaneo. Riprova tra poco.');
+    await bot.sendMessage(chatId, '⚠️ *Errore temporaneo.* Riprova tra poco.', { parse_mode: 'Markdown' });
   }
 });
 
@@ -357,12 +358,12 @@ bot.on('message', async (msg) => {
 async function askPlan(chatId) {
   const s = getOrCreateSession(chatId);
   s.step = STEPS.PLAN;
-  await bot.sendMessage(chatId, '6/7 — Che tipo di abbonamento per il server Discord hai acquistato?', KB_PLAN);
+  await bot.sendMessage(chatId, '🧾 *6/7* — Che tipo di **abbonamento Discord** hai acquistato?', KB_PLAN);
 }
 async function askPayment(chatId) {
   const s = getOrCreateSession(chatId);
   s.step = STEPS.PAYMENT;
-  await bot.sendMessage(chatId, '7/7 — Che tipo di pagamento hai utilizzato?', KB_PAYMENT);
+  await bot.sendMessage(chatId, '💳 *7/7* — Che tipo di **pagamento** hai utilizzato?', KB_PAYMENT);
 }
 
 async function finishFlow(chatId) {
@@ -374,7 +375,7 @@ async function finishFlow(chatId) {
     sessions.delete(chatId);
   } catch (e) {
     console.error('saveIntake_error', e);
-    let msg = '⚠️ Errore nel salvataggio.';
+    let msg = '⚠️ *Errore nel salvataggio.*';
     if (String(e.message || '').toLowerCase().includes('unique')) {
       msg += ' Alcuni dati risultano già registrati. Verifica i campi oppure contatta **Jonny**.';
     }
@@ -388,7 +389,7 @@ bot.on('callback_query', async (query) => {
   const s = getOrCreateSession(chatId);
 
   try {
-    // BACK: torna allo step precedente (se esiste)
+    // INDIETRO
     if (data === 'BACK') {
       const prev = PREV[s.step];
       if (!prev) {
@@ -403,9 +404,8 @@ bot.on('callback_query', async (query) => {
     // Discord helper
     if (data === 'NO_DISCORD' && s.step === STEPS.DC_NICK) {
       await bot.answerCallbackQuery(query.id);
-      await bot.sendMessage(chatId, 'Scarica Discord da qui:\nhttps://discord.com/download');
-      await bot.sendMessage(chatId, 'Scarica Discord, registrati ed inserisci il tuo nickname Discord.');
-      // riproponi lo step
+      await bot.sendMessage(chatId, '⬇️ Scarica Discord da qui:\nhttps://discord.com/download');
+      await bot.sendMessage(chatId, '✅ *Scarica Discord, registrati ed inserisci il tuo nickname Discord.*', { parse_mode: 'Markdown' });
       await askStep(chatId, STEPS.DC_NICK);
       return;
     }
@@ -413,9 +413,8 @@ bot.on('callback_query', async (query) => {
     // Bitget helper
     if (data === 'NO_BITGET' && s.step === STEPS.BITGET) {
       await bot.answerCallbackQuery(query.id);
-      await bot.sendMessage(chatId, 'Scarica Bitget da qui:\nhttps://bonus.bitget.com/KZZRD3');
-      await bot.sendMessage(chatId, 'Scarica Bitget, registrati, ed inserisci il tuo UID.');
-      // riproponi lo step
+      await bot.sendMessage(chatId, '⬇️ Scarica Bitget da qui:\nhttps://bonus.bitget.com/KZZRD3');
+      await bot.sendMessage(chatId, '✅ *Scarica Bitget, registrati, ed inserisci il tuo UID.*', { parse_mode: 'Markdown' });
       await askStep(chatId, STEPS.BITGET);
       return;
     }
@@ -428,7 +427,7 @@ bot.on('callback_query', async (query) => {
         return;
       }
       s.data.plan = plan;
-      await bot.answerCallbackQuery(query.id, { text: `Hai scelto: ${planHuman(plan)}` });
+      await bot.answerCallbackQuery(query.id, { text: `Scelto: ${planHuman(plan)}` });
       await askPayment(chatId);
       return;
     }
@@ -436,7 +435,7 @@ bot.on('callback_query', async (query) => {
     // PAYMENT
     if (data.startsWith('PAY:') && s.step === STEPS.PAYMENT) {
       const pay = data.split(':')[1];
-      if (!['BANK_TRANSFER', 'PAYPAL', 'USDT_TRANSFER'].includes(pay)) {
+      if (!['BANK_TRANSFER', 'PAYPAL', 'USDT_BEP20', 'USDT_ERC20', 'USDT_TRC20'].includes(pay)) {
         await bot.answerCallbackQuery(query.id, { text: 'Selezione non valida.' });
         return;
       }
