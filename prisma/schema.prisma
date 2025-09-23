@@ -21,13 +21,13 @@ enum PaymentMethod {
 
 model Intake {
   id               Int            @id @default(autoincrement())
-  telegramUserId   String?
+  telegramUserId   String?        // id numerico telegram come stringa
   telegramNick     String
   discordNick      String
   bitgetUID        String
   email            String
-  phoneCountryCode String
-  phoneNumber      String
+  phoneCountryCode String         // es. +39
+  phoneNumber      String         // es. 3331234567
   plan             Plan
   payment          PaymentMethod
   createdAt        DateTime       @default(now())
