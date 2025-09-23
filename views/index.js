@@ -3,6 +3,8 @@ import 'dotenv/config';
 import express from 'express';
 import TelegramBot from 'node-telegram-bot-api';
 import { PrismaClient } from '@prisma/client';
+import { startDiscordBot } from './discord.js';
+import cron from 'node-cron';
 
 const prisma = new PrismaClient();
 
@@ -10,6 +12,9 @@ const prisma = new PrismaClient();
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
   polling: { interval: 1000, autoStart: true }
 });
+
+/* ===== Discord helper (freeze/unfreeze per nick) ===== */
+const discord = await startDiscordBot(prisma, process.env); // { createInviteAndSave, freezeByDiscordNick, unfreezeByDiscordNick }
 
 /* ================== STATO CONVERSAZIONI ================== */
 const sessions = new Map(); // key = chatId, value = { step, data }
@@ -47,45 +52,17 @@ const KB_PAYMENT = {
 };
 
 /* ================== NORMALIZZAZIONI & VALIDAZIONI ================== */
-function normTelegramNick(s) {
-  // rimuove @ iniziale, lowercase, trim
-  const t = String(s || '').trim();
-  return t.replace(/^@/, '').toLowerCase();
-}
-function normDiscordNick(s) {
-  // lowercase, trim (Discord modern: username senza #, ma lasciamo libero come testo)
-  return String(s || '').trim().toLowerCase();
-}
-function normEmail(s) {
-  return String(s || '').trim().toLowerCase();
-}
+function normTelegramNick(s) { return String(s||'').trim().replace(/^@/, '').toLowerCase(); }
+function normDiscordNick(s)  { return String(s||'').trim().toLowerCase(); }
+function normEmail(s)        { return String(s||'').trim().toLowerCase(); }
 
-function isValidTelegramNick(s) {
-  // Telegram username: 5-32, alfanumerico + underscore, con o senza @
-  const t = String(s || '').trim();
-  return /^@?[A-Za-z0-9_]{5,32}$/.test(t);
-}
-
-function isValidDiscordNick(s) {
-  // Permettiamo 2-32 caratteri, alfanum + . _ - (no @ obbligatorio)
-  const t = String(s || '').trim();
-  return /^[A-Za-z0-9._-]{2,32}$/.test(t);
-}
-
-function isValidBitgetUID(s) {
-  // Solo cifre, 5-20 (range prudenziale)
-  const t = String(s || '').trim();
-  return /^\d{5,20}$/.test(t);
-}
-
-function isValidEmail(s) {
-  // valida robusta
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || '').trim());
-}
+function isValidTelegramNick(s) { return /^@?[A-Za-z0-9_]{5,32}$/.test(String(s||'').trim()); }
+function isValidDiscordNick(s)  { return /^[A-Za-z0-9._-]{2,32}$/.test(String(s||'').trim()); }
+function isValidBitgetUID(s)    { return /^\d{10}$/.test(String(s||'').trim()); }
+function isValidEmailFmt(s)     { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||'').trim()); }
 
 function parsePhoneWithPrefix(s) {
-  // E.164 light: +CC N..., normalizziamo togliendo spazi
-  const raw = String(s || '').replace(/\s+/g, '');
+  const raw = String(s||'').replace(/\s+/g, '');
   const m = raw.match(/^\+(\d{1,4})(\d{5,15})$/);
   if (!m) return null;
   return { country: `+${m[1]}`, number: m[2] };
@@ -104,34 +81,21 @@ function paymentHuman(pm) {
     : pm;
 }
 
+/* ============ DURATE ABBONAMENTO (per scadenze) ============ */
+function planDurationDays(plan) {
+  if (plan === 'MONTHLY') return 30;
+  if (plan === 'QUARTERLY') return 90;
+  if (plan === 'ANNUAL') return 365;
+  return 30;
+}
+
 /* ================== CHECK DUPLICATI (DB) ================== */
-async function existsTelegramUserId(telegramUserId) {
-  if (!telegramUserId) return false;
-  const found = await prisma.intake.findFirst({ where: { telegramUserId } });
-  return !!found;
-}
-async function existsTelegramNick(nickNorm) {
-  const found = await prisma.intake.findFirst({ where: { telegramNickNorm: nickNorm } });
-  return !!found;
-}
-async function existsDiscordNick(nickNorm) {
-  const found = await prisma.intake.findFirst({ where: { discordNickNorm: nickNorm } });
-  return !!found;
-}
-async function existsBitgetUID(uid) {
-  const found = await prisma.intake.findFirst({ where: { bitgetUID: uid } });
-  return !!found;
-}
-async function existsEmail(emailNorm) {
-  const found = await prisma.intake.findFirst({ where: { emailNorm } });
-  return !!found;
-}
-async function existsPhone(country, number) {
-  const found = await prisma.intake.findFirst({
-    where: { phoneCountryCode: country, phoneNumber: number }
-  });
-  return !!found;
-}
+async function existsTelegramUserId(telegramUserId) { if (!telegramUserId) return false; return !!(await prisma.intake.findFirst({ where: { telegramUserId } })); }
+async function existsTelegramNick(nickNorm)        { return !!(await prisma.intake.findFirst({ where: { telegramNickNorm: nickNorm } })); }
+async function existsDiscordNick(nickNorm)         { return !!(await prisma.intake.findFirst({ where: { discordNickNorm: nickNorm } })); }
+async function existsBitgetUID(uid)                { return !!(await prisma.intake.findFirst({ where: { bitgetUID: uid } })); }
+async function existsEmail(emailNorm)              { return !!(await prisma.intake.findFirst({ where: { emailNorm } })); }
+async function existsPhone(country, number)        { return !!(await prisma.intake.findFirst({ where: { phoneCountryCode: country, phoneNumber: number } })); }
 
 /* ================== PERSISTENZA ================== */
 async function saveIntake(data) {
@@ -149,11 +113,26 @@ async function saveIntake(data) {
       phoneNumber: data.phoneNumber,
       plan: data.plan,
       payment: data.payment
+      // createdAt viene messo automaticamente dal DB
     }
   });
 }
 
-function buildFinalSummary(data) {
+function fmtDateTime(dt) {
+  // Mostra in locale italiana (orario 24h). Se vuoi un fuso specifico, imposta process.env.TZ su Railway.
+  const d = new Date(dt);
+  return d.toLocaleString('it-IT', { hour12: false });
+}
+
+function buildFinalSummary(record, data) {
+  // record.createdAt è la data/ora di registrazione
+  const when = fmtDateTime(record.createdAt);
+  const expiry = (() => {
+    const ends = new Date(record.createdAt);
+    ends.setDate(ends.getDate() + planDurationDays(data.plan));
+    return fmtDateTime(ends);
+  })();
+
   return [
     '✅ *Riepilogo dati*',
     `• Nick Telegram: ${data.telegramNick}`,
@@ -163,6 +142,8 @@ function buildFinalSummary(data) {
     `• Telefono: ${data.phoneCountryCode} ${data.phoneNumber}`,
     `• Abbonamento Discord: ${planHuman(data.plan)}`,
     `• Metodo di pagamento: ${paymentHuman(data.payment)}`,
+    `• Registrazione: ${when}`,
+    `• Scadenza stimata: ${expiry}`,
     '',
     '➡️ *Invia questo messaggio direttamente a **Jonny** in chat privata.*'
   ].join('\n');
@@ -172,7 +153,7 @@ function buildFinalSummary(data) {
 const STEPS_TEXT = {
   TG_NICK: '1/7 — Inviami il tuo **nick Telegram** (con o senza @).',
   DC_NICK: '2/7 — Inviami il tuo **nick Discord** (come appare su Discord).',
-  BITGET:  '3/7 — Inviami il tuo **UID Bitget** (solo cifre).',
+  BITGET:  '3/7 — Inviami il tuo **UID Bitget** (10 cifre).',
   EMAIL:   '4/7 — Inviami la tua **email**.',
   PHONE:   '5/7 — Inviami il tuo **numero di telefono con prefisso**.\nEsempio: `+39 3331234567`',
 };
@@ -196,7 +177,6 @@ bot.onText(/^\/start$/i, async (msg) => {
   const s = getOrCreateSession(chatId);
   s.data = { telegramUserId: String(msg.from?.id || '') };
 
-  // Controlla che lo stesso utente non abbia già inviato un intake
   if (await existsTelegramUserId(s.data.telegramUserId)) {
     await bot.sendMessage(chatId,
       '⚠️ Risulta già una registrazione associata al tuo account Telegram. ' +
@@ -219,8 +199,6 @@ bot.onText(/^\/restart$/i, async (msg) => {
 /* ================== MESSAGGI LIBERI ================== */
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-
-  // ignora callback / comandi / non-testuali
   if (msg.data || msg.text?.startsWith('/')) return;
   const text = (msg.text || '').trim();
   if (!text) return;
@@ -254,7 +232,7 @@ bot.on('message', async (msg) => {
       case STEPS.DC_NICK: {
         if (!isValidDiscordNick(text)) {
           await bot.sendMessage(chatId,
-            '❌ Nick Discord non valido. Usa 2–32 caratteri (lettere, numeri, punto, trattino, underscore).',
+            '❌ Nick Discord non valido. Usa 2–32 caratteri (lettere, numeri, punto, trattino, underscore).'
           );
           return;
         }
@@ -273,9 +251,7 @@ bot.on('message', async (msg) => {
 
       case STEPS.BITGET: {
         if (!isValidBitgetUID(text)) {
-          await bot.sendMessage(chatId,
-            '❌ UID Bitget non valido. Inserisci solo cifre (5–20).'
-          );
+          await bot.sendMessage(chatId, '❌ UID Bitget non valido. Inserisci 10 cifre.');
           return;
         }
         if (await existsBitgetUID(text)) {
@@ -291,11 +267,8 @@ bot.on('message', async (msg) => {
       }
 
       case STEPS.EMAIL: {
-        if (!isValidEmail(text)) {
-          await bot.sendMessage(chatId,
-            '❌ Email non valida. Esempio: `nome@dominio.it`',
-            { parse_mode: 'Markdown' }
-          );
+        if (!isValidEmailFmt(text)) {
+          await bot.sendMessage(chatId, '❌ Email non valida. Esempio: `nome@dominio.it`', { parse_mode: 'Markdown' });
           return;
         }
         const emailNorm = normEmail(text);
@@ -314,10 +287,7 @@ bot.on('message', async (msg) => {
       case STEPS.PHONE: {
         const parsed = parsePhoneWithPrefix(text);
         if (!parsed) {
-          await bot.sendMessage(chatId,
-            '❌ Numero non valido. Usa il formato: `+39 3331234567`',
-            { parse_mode: 'Markdown' }
-          );
+          await bot.sendMessage(chatId, '❌ Numero non valido. Usa il formato: `+39 3331234567`', { parse_mode: 'Markdown' });
           return;
         }
         if (await existsPhone(parsed.country, parsed.number)) {
@@ -333,9 +303,7 @@ bot.on('message', async (msg) => {
         break;
       }
 
-      default:
-        // fuori flusso: ignora
-        break;
+      default: break;
     }
   } catch (err) {
     console.error('flow_error', err);
@@ -360,20 +328,17 @@ async function finishFlow(chatId) {
   s.step = STEPS.END;
 
   try {
-    await saveIntake(s.data);
+    const saved = await saveIntake(s.data);
+    await bot.sendMessage(chatId, buildFinalSummary(saved, s.data), { parse_mode: 'Markdown' });
+    sessions.delete(chatId);
   } catch (e) {
     console.error('saveIntake_error', e);
     let msg = '⚠️ Errore nel salvataggio.';
-    // in caso di race, Prisma può lanciare unique constraint violation:
     if (String(e.message || '').toLowerCase().includes('unique')) {
       msg += ' Alcuni dati risultano già registrati. Verifica i campi oppure contatta **Jonny**.';
     }
     await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
-    return;
   }
-
-  await bot.sendMessage(chatId, buildFinalSummary(s.data), { parse_mode: 'Markdown' });
-  sessions.delete(chatId);
 }
 
 bot.on('callback_query', async (query) => {
@@ -413,6 +378,34 @@ bot.on('callback_query', async (query) => {
   }
 });
 
+/* ================== CRON: FREEZE AUTO SU SCADUTI ================== */
+// Ogni giorno alle 03:00 server time
+cron.schedule('0 3 * * *', async () => {
+  try {
+    // prendi tutti gli intake (in un sistema reale useresti una tabella Subscriptions con rinnovi)
+    const list = await prisma.intake.findMany({
+      select: { discordNick: true, plan: true, createdAt: true }
+    });
+
+    const now = new Date();
+    for (const rec of list) {
+      const ends = new Date(rec.createdAt);
+      ends.setDate(ends.getDate() + planDurationDays(rec.plan));
+      if (now > ends && rec.discordNick) {
+        // scaduto → prova a mettere "frozen" su Discord per quel nick
+        try {
+          await discord.freezeByDiscordNick(rec.discordNick);
+          console.log('frozen_applied', rec.discordNick);
+        } catch (e) {
+          console.error('frozen_failed', rec.discordNick, e?.message || e);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('cron_freeze_error', e);
+  }
+});
+
 /* ================== HEALTH / ERROR ================== */
 const app = express();
 app.get('/', (_req, res) => res.send('OK'));
@@ -423,4 +416,5 @@ bot.on('polling_error', (err) => {
   if (['ETELEGRAM', 'EFATAL'].includes(err?.code)) return;
   console.error('polling_error', err);
 });
+
 
