@@ -16,7 +16,9 @@ enum Plan {
 enum PaymentMethod {
   BANK_TRANSFER
   PAYPAL
-  USDT_TRANSFER
+  USDT_BEP20
+  USDT_ERC20
+  USDT_TRC20
 }
 
 model Intake {
@@ -39,8 +41,11 @@ model Intake {
   emailNorm        String         @unique
   phoneCountryCode String
   phoneNumber      String
+
+  // Scelte
   plan             Plan
   payment          PaymentMethod
+
   createdAt        DateTime       @default(now())
 
   @@index([email])
@@ -57,7 +62,6 @@ model Invite {
   url       String
   createdAt DateTime @default(now())
 }
-
 
 
 
