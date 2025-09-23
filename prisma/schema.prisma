@@ -7,127 +7,45 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-
-
 enum Plan {
   MONTHLY
   QUARTERLY
   ANNUAL
 }
 
-enum Status {
-  PENDING
-  ACTIVE
-  FROZEN
-  CANCELED
-}
-
-enum PayMethod {
-  BANK
+enum PaymentMethod {
+  BANK_TRANSFER
   PAYPAL
-  USDT
+  USDT_TRANSFER
 }
 
-enum UsdtNet {
-  TRC20
-  ERC20
-  BEP20
-}
-
-enum PaymentStatus {
-  PENDING_REVIEW
-  APPROVED
-  REJECTED
-  AUTO_APPROVED
-}
-
-enum Service {
-  TELEGRAM
-  DISCORD
-}
-
-
-
-model User {
-  id             Int            @id @default(autoincrement())
-  telegramUserId String         @unique
-  telegramHandle String?        @unique
-  discordUserId  String?
-  phone          String?
-  email          String?        @unique
-  bitgetUid      String?
-
-  payments       Payment[]
-  subscriptions  Subscription[]
-  invites        Invite[]
-
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+model Intake {
+  id               Int            @id @default(autoincrement())
+  telegramUserId   String?
+  telegramNick     String
+  discordNick      String
+  bitgetUID        String
+  email            String
+  phoneCountryCode String
+  phoneNumber      String
+  plan             Plan
+  payment          PaymentMethod
+  createdAt        DateTime       @default(now())
 
   @@index([email])
-  @@index([telegramHandle])
-}
-
-model Payment {
-  id               Int            @id @default(autoincrement())
-  user             User           @relation(fields: [userId], references: [id])
-  userId           Int
-
-  service          Service?       // ← TEMP: opzionale per poter aggiungere la colonna
-  method           PayMethod
-  usdtNet          UsdtNet?
-
-  proofFileId      String?
-  proofFileUid     String?
-  proofHash        String?        @unique
-  ocrText          String?
-  confidence       Float?
-  recipientMatched Boolean        @default(false)
-
-  payFrom          String?
-  payTo            String?
-  amount          Float
-  amountCurrency  String
-  paidAt          DateTime
-
-  status          PaymentStatus   @default(PENDING_REVIEW)
-  reviewerId      String?
-  reviewNotes     String?
-
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
-
-  @@index([userId, service, status, paidAt])
-}
-
-
-model Subscription {
-  id        Int      @id @default(autoincrement())
-  user      User     @relation(fields: [userId], references: [id])
-  userId    Int
-
-  // String per compatibilità e semplicità di migrazione
-  type      String   @db.VarChar(16) // "DISCORD" | "TELEGRAM"
-  plan      Plan
-  status    Status   @default(ACTIVE)
-
-  startAt   DateTime
-  endAt     DateTime
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([userId, type, endAt])
+  @@index([telegramNick])
+  @@index([discordNick])
+  @@index([bitgetUID])
 }
 
 model Invite {
   id        Int      @id @default(autoincrement())
-  user      User     @relation(fields: [userId], references: [id])
   userId    Int
   code      String   @unique
   url       String
   createdAt DateTime @default(now())
 }
+
 
 
 
