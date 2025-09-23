@@ -21,13 +21,24 @@ enum PaymentMethod {
 
 model Intake {
   id               Int            @id @default(autoincrement())
-  telegramUserId   String?        // id numerico telegram come stringa
+
+  // Identità Telegram
+  telegramUserId   String?        @unique
   telegramNick     String
+  telegramNickNorm String         @unique
+
+  // Identità Discord
   discordNick      String
-  bitgetUID        String
+  discordNickNorm  String         @unique
+
+  // Exchange
+  bitgetUID        String         @unique
+
+  // Contatti
   email            String
-  phoneCountryCode String         // es. +39
-  phoneNumber      String         // es. 3331234567
+  emailNorm        String         @unique
+  phoneCountryCode String
+  phoneNumber      String
   plan             Plan
   payment          PaymentMethod
   createdAt        DateTime       @default(now())
@@ -36,6 +47,7 @@ model Intake {
   @@index([telegramNick])
   @@index([discordNick])
   @@index([bitgetUID])
+  @@unique([phoneCountryCode, phoneNumber])
 }
 
 model Invite {
