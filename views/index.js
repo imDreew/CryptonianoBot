@@ -3,8 +3,7 @@ import 'dotenv/config';
 import express from 'express';
 import TelegramBot from 'node-telegram-bot-api';
 import { PrismaClient } from '@prisma/client';
-import { startDiscordBot } from './discord.js';
-import cron from 'node-cron';
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 const prisma = new PrismaClient();
 
@@ -12,9 +11,6 @@ const prisma = new PrismaClient();
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
   polling: { interval: 1000, autoStart: true }
 });
-
-/* ===== Discord helper (freeze/unfreeze per nick) ===== */
-const discord = await startDiscordBot(prisma, process.env); // { createInviteAndSave, freezeByDiscordNick, unfreezeByDiscordNick }
 
 /* ================== STATO CONVERSAZIONI ================== */
 const sessions = new Map(); // key = chatId, value = { step, data }
@@ -31,12 +27,48 @@ const STEPS = {
   END: 'END'
 };
 
+// Mappa step precedente (per INDIETRO)
+const PREV = {
+  [STEPS.DC_NICK]: STEPS.TG_NICK,
+  [STEPS.BITGET]:  STEPS.DC_NICK,
+  [STEPS.EMAIL]:   STEPS.BITGET,
+  [STEPS.PHONE]:   STEPS.EMAIL,
+  [STEPS.PLAN]:    STEPS.PHONE,
+  [STEPS.PAYMENT]: STEPS.PLAN
+};
+
+/* ================== TASTI ================== */
+
+// back generico
+const KB_BACK = { reply_markup: { inline_keyboard: [[{ text: '⬅️ INDIETRO', callback_data: 'BACK' }]] } };
+
+// step Discord: back + “Non hai Discord?”
+const KB_DC = {
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: 'Non hai Discord?', callback_data: 'NO_DISCORD' }],
+      [{ text: '⬅️ INDIETRO', callback_data: 'BACK' }]
+    ]
+  }
+};
+
+// step Bitget: back + “Non ho Bitget”
+const KB_BG = {
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: 'Non ho Bitget', callback_data: 'NO_BITGET' }],
+      [{ text: '⬅️ INDIETRO', callback_data: 'BACK' }]
+    ]
+  }
+};
+
 const KB_PLAN = {
   reply_markup: {
     inline_keyboard: [
       [{ text: 'Mensile',     callback_data: 'PLAN:MONTHLY' }],
       [{ text: 'Trimestrale', callback_data: 'PLAN:QUARTERLY' }],
-      [{ text: 'Annuale',     callback_data: 'PLAN:ANNUAL' }]
+      [{ text: 'Annuale',     callback_data: 'PLAN:ANNUAL' }],
+      [{ text: '⬅️ INDIETRO', callback_data: 'BACK' }]
     ]
   }
 };
@@ -46,7 +78,8 @@ const KB_PAYMENT = {
     inline_keyboard: [
       [{ text: 'Bonifico Bancario', callback_data: 'PAY:BANK_TRANSFER' }],
       [{ text: 'PayPal',            callback_data: 'PAY:PAYPAL' }],
-      [{ text: 'Transfer USDT',     callback_data: 'PAY:USDT_TRANSFER' }]
+      [{ text: 'Transfer USDT',     callback_data: 'PAY:USDT_TRANSFER' }],
+      [{ text: '⬅️ INDIETRO',       callback_data: 'BACK' }]
     ]
   }
 };
@@ -58,14 +91,20 @@ function normEmail(s)        { return String(s||'').trim().toLowerCase(); }
 
 function isValidTelegramNick(s) { return /^@?[A-Za-z0-9_]{5,32}$/.test(String(s||'').trim()); }
 function isValidDiscordNick(s)  { return /^[A-Za-z0-9._-]{2,32}$/.test(String(s||'').trim()); }
-function isValidBitgetUID(s)    { return /^\d{10}$/.test(String(s||'').trim()); }
+function isValidBitgetUID(s)    { return /^\d{5,20}$/.test(String(s||'').trim()); }
 function isValidEmailFmt(s)     { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s||'').trim()); }
 
-function parsePhoneWithPrefix(s) {
-  const raw = String(s||'').replace(/\s+/g, '');
-  const m = raw.match(/^\+(\d{1,4})(\d{5,15})$/);
-  if (!m) return null;
-  return { country: `+${m[1]}`, number: m[2] };
+function parsePhoneWithPrefix(input) {
+  const cleaned = String(input || '').replace(/[^\d+]/g, '');
+  if (!cleaned.startsWith('+')) return null;
+  const phone = parsePhoneNumberFromString(cleaned);
+  if (!phone || !phone.isValid()) return null;
+  return {
+    country: `+${phone.countryCallingCode}`,
+    number: phone.nationalNumber,
+    e164: phone.number,
+    iso2: phone.country
+  };
 }
 
 function planHuman(plan) {
@@ -80,8 +119,6 @@ function paymentHuman(pm) {
     : pm === 'USDT_TRANSFER' ? 'Transfer USDT'
     : pm;
 }
-
-/* ============ DURATE ABBONAMENTO (per scadenze) ============ */
 function planDurationDays(plan) {
   if (plan === 'MONTHLY') return 30;
   if (plan === 'QUARTERLY') return 90;
@@ -113,26 +150,14 @@ async function saveIntake(data) {
       phoneNumber: data.phoneNumber,
       plan: data.plan,
       payment: data.payment
-      // createdAt viene messo automaticamente dal DB
     }
   });
 }
-
-function fmtDateTime(dt) {
-  // Mostra in locale italiana (orario 24h). Se vuoi un fuso specifico, imposta process.env.TZ su Railway.
-  const d = new Date(dt);
-  return d.toLocaleString('it-IT', { hour12: false });
-}
-
+function fmtDateTime(dt) { return new Date(dt).toLocaleString('it-IT', { hour12: false }); }
 function buildFinalSummary(record, data) {
-  // record.createdAt è la data/ora di registrazione
   const when = fmtDateTime(record.createdAt);
-  const expiry = (() => {
-    const ends = new Date(record.createdAt);
-    ends.setDate(ends.getDate() + planDurationDays(data.plan));
-    return fmtDateTime(ends);
-  })();
-
+  const ends = new Date(record.createdAt); ends.setDate(ends.getDate() + planDurationDays(data.plan));
+  const expiry = fmtDateTime(ends);
   return [
     '✅ *Riepilogo dati*',
     `• Nick Telegram: ${data.telegramNick}`,
@@ -153,22 +178,35 @@ function buildFinalSummary(record, data) {
 const STEPS_TEXT = {
   TG_NICK: '1/7 — Inviami il tuo **nick Telegram** (con o senza @).',
   DC_NICK: '2/7 — Inviami il tuo **nick Discord** (come appare su Discord).',
-  BITGET:  '3/7 — Inviami il tuo **UID Bitget** (10 cifre).',
+  BITGET:  '3/7 — Inviami il tuo **UID Bitget** (solo cifre).',
   EMAIL:   '4/7 — Inviami la tua **email**.',
-  PHONE:   '5/7 — Inviami il tuo **numero di telefono con prefisso**.\nEsempio: `+39 3331234567`',
+  PHONE:   '5/7 — Inviami il tuo **numero di telefono con prefisso internazionale**.\nEsempi: `+39 3331234567`, `+41 765432109`'
 };
 
-async function askStep(chatId, step, extra='') {
-  const s = getOrCreateSession(chatId);
-  s.step = step;
-  const text = STEPS_TEXT[step] || '';
-  await bot.sendMessage(chatId, [text, extra].filter(Boolean).join('\n'), { parse_mode: 'Markdown' });
-}
-
-/* ================== SESSION ================== */
 function getOrCreateSession(chatId) {
   if (!sessions.has(chatId)) sessions.set(chatId, { step: STEPS.START, data: {} });
   return sessions.get(chatId);
+}
+
+async function askStep(chatId, step) {
+  const s = getOrCreateSession(chatId);
+  s.step = step;
+
+  // Per ogni step (tranne il primo) mostriamo il bottone INDIETRO
+  if (step === STEPS.TG_NICK) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown' });
+  } else if (step === STEPS.DC_NICK) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_DC.reply_markup });
+  } else if (step === STEPS.BITGET) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_BG.reply_markup });
+  } else if (step === STEPS.EMAIL) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_BACK.reply_markup });
+  } else if (step === STEPS.PHONE) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_BACK.reply_markup });
+  } else {
+    // per sicurezza, default con back
+    await bot.sendMessage(chatId, STEPS_TEXT[step] || 'Procedi.', { parse_mode: 'Markdown', reply_markup: KB_BACK.reply_markup });
+  }
 }
 
 /* ================== COMANDI ================== */
@@ -185,8 +223,7 @@ bot.onText(/^\/start$/i, async (msg) => {
     );
     return;
   }
-  const hint = msg.from?.username ? ` (es.: @${msg.from.username})` : '';
-  await askStep(chatId, STEPS.TG_NICK, `Suggerimento${hint}`);
+  await askStep(chatId, STEPS.TG_NICK);
 });
 
 bot.onText(/^\/restart$/i, async (msg) => {
@@ -200,6 +237,7 @@ bot.onText(/^\/restart$/i, async (msg) => {
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   if (msg.data || msg.text?.startsWith('/')) return;
+
   const text = (msg.text || '').trim();
   if (!text) return;
 
@@ -251,7 +289,7 @@ bot.on('message', async (msg) => {
 
       case STEPS.BITGET: {
         if (!isValidBitgetUID(text)) {
-          await bot.sendMessage(chatId, '❌ UID Bitget non valido. Inserisci 10 cifre.');
+          await bot.sendMessage(chatId, '❌ UID Bitget non valido. Inserisci solo cifre (5–20).');
           return;
         }
         if (await existsBitgetUID(text)) {
@@ -287,7 +325,11 @@ bot.on('message', async (msg) => {
       case STEPS.PHONE: {
         const parsed = parsePhoneWithPrefix(text);
         if (!parsed) {
-          await bot.sendMessage(chatId, '❌ Numero non valido. Usa il formato: `+39 3331234567`', { parse_mode: 'Markdown' });
+          await bot.sendMessage(chatId,
+            '❌ Numero non valido. Usa il formato **internazionale** con prefisso “+”.\n' +
+            'Esempi validi: `+39 3331234567`, `+41 765432109`',
+            { parse_mode: 'Markdown' }
+          );
           return;
         }
         if (await existsPhone(parsed.country, parsed.number)) {
@@ -311,7 +353,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-/* ================== BOTTONI (PIANO/PAGAMENTO) ================== */
+/* ================== BOTTONI (CALLBACK) ================== */
 async function askPlan(chatId) {
   const s = getOrCreateSession(chatId);
   s.step = STEPS.PLAN;
@@ -326,7 +368,6 @@ async function askPayment(chatId) {
 async function finishFlow(chatId) {
   const s = getOrCreateSession(chatId);
   s.step = STEPS.END;
-
   try {
     const saved = await saveIntake(s.data);
     await bot.sendMessage(chatId, buildFinalSummary(saved, s.data), { parse_mode: 'Markdown' });
@@ -347,6 +388,39 @@ bot.on('callback_query', async (query) => {
   const s = getOrCreateSession(chatId);
 
   try {
+    // BACK: torna allo step precedente (se esiste)
+    if (data === 'BACK') {
+      const prev = PREV[s.step];
+      if (!prev) {
+        await bot.answerCallbackQuery(query.id, { text: 'Non puoi tornare indietro da qui.' });
+        return;
+      }
+      await bot.answerCallbackQuery(query.id);
+      await askStep(chatId, prev);
+      return;
+    }
+
+    // Discord helper
+    if (data === 'NO_DISCORD' && s.step === STEPS.DC_NICK) {
+      await bot.answerCallbackQuery(query.id);
+      await bot.sendMessage(chatId, 'Scarica Discord da qui:\nhttps://discord.com/download');
+      await bot.sendMessage(chatId, 'Scarica Discord, registrati ed inserisci il tuo nickname Discord.');
+      // riproponi lo step
+      await askStep(chatId, STEPS.DC_NICK);
+      return;
+    }
+
+    // Bitget helper
+    if (data === 'NO_BITGET' && s.step === STEPS.BITGET) {
+      await bot.answerCallbackQuery(query.id);
+      await bot.sendMessage(chatId, 'Scarica Bitget da qui:\nhttps://bonus.bitget.com/KZZRD3');
+      await bot.sendMessage(chatId, 'Scarica Bitget, registrati, ed inserisci il tuo UID.');
+      // riproponi lo step
+      await askStep(chatId, STEPS.BITGET);
+      return;
+    }
+
+    // PLAN
     if (data.startsWith('PLAN:') && s.step === STEPS.PLAN) {
       const plan = data.split(':')[1];
       if (!['MONTHLY', 'QUARTERLY', 'ANNUAL'].includes(plan)) {
@@ -359,6 +433,7 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
+    // PAYMENT
     if (data.startsWith('PAY:') && s.step === STEPS.PAYMENT) {
       const pay = data.split(':')[1];
       if (!['BANK_TRANSFER', 'PAYPAL', 'USDT_TRANSFER'].includes(pay)) {
@@ -375,34 +450,6 @@ bot.on('callback_query', async (query) => {
   } catch (e) {
     console.error('callback_error', e);
     try { await bot.answerCallbackQuery(query.id, { text: 'Errore, riprova.' }); } catch {}
-  }
-});
-
-/* ================== CRON: FREEZE AUTO SU SCADUTI ================== */
-// Ogni giorno alle 03:00 server time
-cron.schedule('0 3 * * *', async () => {
-  try {
-    // prendi tutti gli intake (in un sistema reale useresti una tabella Subscriptions con rinnovi)
-    const list = await prisma.intake.findMany({
-      select: { discordNick: true, plan: true, createdAt: true }
-    });
-
-    const now = new Date();
-    for (const rec of list) {
-      const ends = new Date(rec.createdAt);
-      ends.setDate(ends.getDate() + planDurationDays(rec.plan));
-      if (now > ends && rec.discordNick) {
-        // scaduto → prova a mettere "frozen" su Discord per quel nick
-        try {
-          await discord.freezeByDiscordNick(rec.discordNick);
-          console.log('frozen_applied', rec.discordNick);
-        } catch (e) {
-          console.error('frozen_failed', rec.discordNick, e?.message || e);
-        }
-      }
-    }
-  } catch (e) {
-    console.error('cron_freeze_error', e);
   }
 });
 
