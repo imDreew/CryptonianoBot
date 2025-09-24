@@ -16,12 +16,10 @@ enum Plan {
 enum PaymentMethod {
   BANK_TRANSFER
   PAYPAL
-  USDT_TRANSFER   // <-- lascialo per i record storici
   USDT_BEP20
   USDT_ERC20
   USDT_TRC20
 }
-
 
 model Intake {
   id               Int            @id @default(autoincrement())
