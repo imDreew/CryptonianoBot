@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "prestart": "npx prisma db push --accept-data-loss && npx prisma generate",
+    "prestart": "npx prisma db push && npx prisma generate",
     "start": "node views/index.js"
   },
   "dependencies": {
