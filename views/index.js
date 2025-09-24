@@ -174,7 +174,7 @@ function buildFinalSummary(record, data) {
     `• 🕒 Registrazione: *${when}*`,
     `• ⏰ Scadenza stimata: *${expiry}*`,
     '',
-    '➡️ *Invia questo messaggio direttamente a **Il Cryptoniano** in chat privata.*'
+    '➡️ *Invia questo messaggio direttamente a **Jonny** in chat privata.*'
   ].join('\n');
 }
 
@@ -198,7 +198,7 @@ async function askStep(chatId, step) {
 
   // Per ogni step (tranne il primo) mostriamo il bottone INDIETRO; per Discord/Bitget anche i bottoni di aiuto
   if (step === STEPS.TG_NICK) {
-    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown' });
   } else if (step === STEPS.DC_NICK) {
     await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_DC.reply_markup });
   } else if (step === STEPS.BITGET) {
@@ -220,8 +220,8 @@ bot.onText(/^\/start$/i, async (msg) => {
 
   if (await existsTelegramUserId(s.data.telegramUserId)) {
     await bot.sendMessage(chatId,
-      '⚠️ *Attenzione*: risulta già una registrazione associata al tuo account Telegram.\nSe pensi sia un errore, contatta **Il Cryptoniano** in privato.',
-      { parse_mode: 'HTML' }
+      '⚠️ *Attenzione*: risulta già una registrazione associata al tuo account Telegram.\nSe pensi sia un errore, contatta **Jonny** in privato.',
+      { parse_mode: 'Markdown' }
     );
     return;
   }
@@ -231,7 +231,7 @@ bot.onText(/^\/start$/i, async (msg) => {
 bot.onText(/^\/restart$/i, async (msg) => {
   const chatId = msg.chat.id;
   sessions.delete(chatId);
-  await bot.sendMessage(chatId, '🔁 *Flusso azzerato.*\nRipartiamo da capo!', { parse_mode: 'HTML' });
+  await bot.sendMessage(chatId, '🔁 *Flusso azzerato.*\nRipartiamo da capo!', { parse_mode: 'Markdown' });
   await askStep(chatId, STEPS.TG_NICK);
 });
 
@@ -251,15 +251,15 @@ bot.on('message', async (msg) => {
         if (!isValidTelegramNick(text)) {
           await bot.sendMessage(chatId,
             '❌ *Nick Telegram non valido.*\nDeve essere 5–32 caratteri alfanumerici/underscore, con o senza @.\nEsempi: `@crypto_user`, `crypto_user`',
-            { parse_mode: 'HTML' }
+            { parse_mode: 'Markdown' }
           );
           return;
         }
         const nickNorm = normTelegramNick(text);
         if (await existsTelegramNick(nickNorm)) {
           await bot.sendMessage(chatId,
-            '⚠️ Questo *nick Telegram* risulta già registrato. Inserisci un nick diverso oppure contatta **Il Cryptoniano**.',
-            { parse_mode: 'HTML' }
+            '⚠️ Questo *nick Telegram* risulta già registrato. Inserisci un nick diverso oppure contatta **Jonny**.',
+            { parse_mode: 'Markdown' }
           );
           return;
         }
@@ -272,15 +272,15 @@ bot.on('message', async (msg) => {
         if (!isValidDiscordNick(text)) {
           await bot.sendMessage(chatId,
             '❌ *Nick Discord non valido.* Usa 2–32 caratteri (lettere, numeri, punto, trattino, underscore).',
-            { parse_mode: 'HTML' }
+            { parse_mode: 'Markdown' }
           );
           return;
         }
         const nickNorm = normDiscordNick(text);
         if (await existsDiscordNick(nickNorm)) {
           await bot.sendMessage(chatId,
-            '⚠️ Questo *nick Discord* risulta già registrato. Inserisci un nick diverso oppure contatta **Il Cryptoniano**.',
-            { parse_mode: 'HTML' }
+            '⚠️ Questo *nick Discord* risulta già registrato. Inserisci un nick diverso oppure contatta **Jonny**.',
+            { parse_mode: 'Markdown' }
           );
           return;
         }
@@ -291,13 +291,13 @@ bot.on('message', async (msg) => {
 
       case STEPS.BITGET: {
         if (!isValidBitgetUID(text)) {
-          await bot.sendMessage(chatId, '❌ *UID Bitget non valido.* Inserisci solo cifre (5–20).', { parse_mode: 'HTML' });
+          await bot.sendMessage(chatId, '❌ *UID Bitget non valido.* Inserisci solo cifre (5–20).', { parse_mode: 'Markdown' });
           return;
         }
         if (await existsBitgetUID(text)) {
           await bot.sendMessage(chatId,
-            '⚠️ Questo *UID Bitget* risulta già registrato. Verifica e reinserisci, oppure contatta **Il Cryptoniano**.',
-            { parse_mode: 'HTML' }
+            '⚠️ Questo *UID Bitget* risulta già registrato. Verifica e reinserisci, oppure contatta **Jonny**.',
+            { parse_mode: 'Markdown' }
           );
           return;
         }
@@ -308,14 +308,14 @@ bot.on('message', async (msg) => {
 
       case STEPS.EMAIL: {
         if (!isValidEmailFmt(text)) {
-          await bot.sendMessage(chatId, '❌ *Email non valida.* Esempio: `nome@dominio.it`', { parse_mode: 'HTML' });
+          await bot.sendMessage(chatId, '❌ *Email non valida.* Esempio: `nome@dominio.it`', { parse_mode: 'Markdown' });
           return;
         }
         const emailNorm = normEmail(text);
         if (await existsEmail(emailNorm)) {
           await bot.sendMessage(chatId,
-            '⚠️ *Email* già registrata. Usa un’altra email o contatta **Il Cryptoniano**.',
-            { parse_mode: 'HTML' }
+            '⚠️ *Email* già registrata. Usa un’altra email o contatta **Jonny**.',
+            { parse_mode: 'Markdown' }
           );
           return;
         }
@@ -329,14 +329,14 @@ bot.on('message', async (msg) => {
         if (!parsed) {
           await bot.sendMessage(chatId,
             '❌ *Numero non valido.* Usa il formato **internazionale** con prefisso “+”.\nEsempi: `+39 3331234567`, `+41 765432109`',
-            { parse_mode: 'HTML' }
+            { parse_mode: 'Markdown' }
           );
           return;
         }
         if (await existsPhone(parsed.country, parsed.number)) {
           await bot.sendMessage(chatId,
-            '⚠️ *Numero di telefono* già registrato. Inserisci un altro numero o contatta **Il Cryptoniano**.',
-            { parse_mode: 'HTML' }
+            '⚠️ *Numero di telefono* già registrato. Inserisci un altro numero o contatta **Jonny**.',
+            { parse_mode: 'Markdown' }
           );
           return;
         }
@@ -350,7 +350,7 @@ bot.on('message', async (msg) => {
     }
   } catch (err) {
     console.error('flow_error', err);
-    await bot.sendMessage(chatId, '⚠️ *Errore temporaneo.* Riprova tra poco.', { parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, '⚠️ *Errore temporaneo.* Riprova tra poco.', { parse_mode: 'Markdown' });
   }
 });
 
@@ -371,15 +371,15 @@ async function finishFlow(chatId) {
   s.step = STEPS.END;
   try {
     const saved = await saveIntake(s.data);
-    await bot.sendMessage(chatId, buildFinalSummary(saved, s.data), { parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, buildFinalSummary(saved, s.data), { parse_mode: 'Markdown' });
     sessions.delete(chatId);
   } catch (e) {
     console.error('saveIntake_error', e);
     let msg = '⚠️ *Errore nel salvataggio.*';
     if (String(e.message || '').toLowerCase().includes('unique')) {
-      msg += ' Alcuni dati risultano già registrati. Verifica i campi oppure contatta **Il Cryptoniano**.';
+      msg += ' Alcuni dati risultano già registrati. Verifica i campi oppure contatta **Jonny**.';
     }
-    await bot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
   }
 }
 
@@ -405,7 +405,7 @@ bot.on('callback_query', async (query) => {
     if (data === 'NO_DISCORD' && s.step === STEPS.DC_NICK) {
       await bot.answerCallbackQuery(query.id);
       await bot.sendMessage(chatId, '⬇️ Scarica Discord da qui:\nhttps://discord.com/download');
-      await bot.sendMessage(chatId, '✅ *Scarica Discord, registrati ed inserisci il tuo nickname Discord.*', { parse_mode: 'HTML' });
+      await bot.sendMessage(chatId, '✅ *Scarica Discord, registrati ed inserisci il tuo nickname Discord.*', { parse_mode: 'Markdown' });
       await askStep(chatId, STEPS.DC_NICK);
       return;
     }
@@ -414,7 +414,7 @@ bot.on('callback_query', async (query) => {
     if (data === 'NO_BITGET' && s.step === STEPS.BITGET) {
       await bot.answerCallbackQuery(query.id);
       await bot.sendMessage(chatId, '⬇️ Scarica Bitget da qui:\nhttps://bonus.bitget.com/KZZRD3');
-      await bot.sendMessage(chatId, '✅ *Scarica Bitget, registrati, ed inserisci il tuo UID.*', { parse_mode: 'HTML' });
+      await bot.sendMessage(chatId, '✅ *Scarica Bitget, registrati, ed inserisci il tuo UID.*', { parse_mode: 'Markdown' });
       await askStep(chatId, STEPS.BITGET);
       return;
     }
@@ -462,5 +462,6 @@ bot.on('polling_error', (err) => {
   if (['ETELEGRAM', 'EFATAL'].includes(err?.code)) return;
   console.error('polling_error', err);
 });
+
 
 
