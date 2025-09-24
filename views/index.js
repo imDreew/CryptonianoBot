@@ -7,12 +7,57 @@ import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 const prisma = new PrismaClient();
 
-/* ================== TELEGRAM BOT ================== */
+/* ===========================
+   TELEGRAM BOT (no hardcode)
+=========================== */
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
   polling: { interval: 1000, autoStart: true }
 });
 
-/* ================== STATO CONVERSAZIONI ================== */
+/* ===========================
+   UTILS: chat_id sicuro + HTML
+=========================== */
+function getChatId(update) {
+  // message
+  if (update?.chat?.id) return update.chat.id;
+  if (update?.message?.chat?.id) return update.message.chat.id;
+  // callback_query
+  if (update?.message?.chat?.id) return update.message.chat.id;
+  // my_chat_member / chat_member
+  if (update?.my_chat_member?.chat?.id) return update.my_chat_member.chat.id;
+  return null;
+}
+
+async function replyTo(update, text, opts = {}) {
+  const chatId = getChatId(update);
+  if (chatId == null) {
+    console.warn('replyTo: chatId non trovato per update.');
+    return null;
+  }
+  try {
+    return await bot.sendMessage(chatId, text, { parse_mode: 'HTML', ...opts });
+  } catch (err) {
+    const desc = err?.response?.body?.description || err?.message || '';
+    const code = err?.response?.statusCode || err?.code;
+    console.error('sendMessage error', code, desc);
+    return null;
+  }
+}
+
+function escHTML(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function fmtDateTime(dt) {
+  return new Date(dt).toLocaleString('it-IT', { hour12: false });
+}
+
+/* ===========================
+   SESSIONE
+=========================== */
 const sessions = new Map(); // key = chatId, value = { step, data }
 
 const STEPS = {
@@ -27,7 +72,6 @@ const STEPS = {
   END: 'END'
 };
 
-// Mappa step precedente (per INDIETRO)
 const PREV = {
   [STEPS.DC_NICK]: STEPS.TG_NICK,
   [STEPS.BITGET]:  STEPS.DC_NICK,
@@ -37,12 +81,16 @@ const PREV = {
   [STEPS.PAYMENT]: STEPS.PLAN
 };
 
-/* ================== TASTI ================== */
+function getOrCreateSession(chatId) {
+  if (!sessions.has(chatId)) sessions.set(chatId, { step: STEPS.START, data: {} });
+  return sessions.get(chatId);
+}
 
-// back generico
+/* ===========================
+   TASTI INLINE
+=========================== */
 const KB_BACK = { reply_markup: { inline_keyboard: [[{ text: '⬅️ INDIETRO', callback_data: 'BACK' }]] } };
 
-// step Discord: back + “Non hai Discord?”
 const KB_DC = {
   reply_markup: {
     inline_keyboard: [
@@ -52,7 +100,6 @@ const KB_DC = {
   }
 };
 
-// step Bitget: back + “Non ho Bitget”
 const KB_BG = {
   reply_markup: {
     inline_keyboard: [
@@ -86,7 +133,39 @@ const KB_PAYMENT = {
   }
 };
 
-/* ================== NORMALIZZAZIONI & VALIDAZIONI ================== */
+/* ===========================
+   TESTI STEP
+=========================== */
+const STEPS_TEXT = {
+  TG_NICK: '👋 <b>Benvenuto!</b>\n\n<b>1/7</b> — Inviami il tuo <b>nick Telegram</b> (con o senza @).',
+  DC_NICK: '🎮 <b>2/7</b> — Inviami il tuo <b>nick Discord</b> (come appare su Discord).',
+  BITGET:  '🏦 <b>3/7</b> — Inviami il tuo <b>UID Bitget</b> (solo cifre).',
+  EMAIL:   '✉️ <b>4/7</b> — Inviami la tua <b>email</b>.',
+  PHONE:   '📞 <b>5/7</b> — Inviami il tuo <b>numero di telefono con prefisso internazionale</b>.<br>Esempi: <code>+39 3331234567</code>, <code>+41 765432109</code>'
+};
+
+async function askStep(chatId, step) {
+  const s = getOrCreateSession(chatId);
+  s.step = step;
+
+  if (step === STEPS.TG_NICK) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'HTML' });
+  } else if (step === STEPS.DC_NICK) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'HTML', reply_markup: KB_DC.reply_markup });
+  } else if (step === STEPS.BITGET) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'HTML', reply_markup: KB_BG.reply_markup });
+  } else if (step === STEPS.EMAIL) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'HTML', reply_markup: KB_BACK.reply_markup });
+  } else if (step === STEPS.PHONE) {
+    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'HTML', reply_markup: KB_BACK.reply_markup });
+  } else {
+    await bot.sendMessage(chatId, STEPS_TEXT[step] || 'Procedi.', { parse_mode: 'HTML', reply_markup: KB_BACK.reply_markup });
+  }
+}
+
+/* ===========================
+   NORMALIZZAZIONI & VALIDAZIONI
+=========================== */
 function normTelegramNick(s) { return String(s||'').trim().replace(/^@/, '').toLowerCase(); }
 function normDiscordNick(s)  { return String(s||'').trim().toLowerCase(); }
 function normEmail(s)        { return String(s||'').trim().toLowerCase(); }
@@ -130,7 +209,9 @@ function planDurationDays(plan) {
   return 30;
 }
 
-/* ================== CHECK DUPLICATI (DB) ================== */
+/* ===========================
+   CHECK DUPLICATI (DB)
+=========================== */
 async function existsTelegramUserId(telegramUserId) { if (!telegramUserId) return false; return !!(await prisma.intake.findFirst({ where: { telegramUserId } })); }
 async function existsTelegramNick(nickNorm)        { return !!(await prisma.intake.findFirst({ where: { telegramNickNorm: nickNorm } })); }
 async function existsDiscordNick(nickNorm)         { return !!(await prisma.intake.findFirst({ where: { discordNickNorm: nickNorm } })); }
@@ -138,7 +219,9 @@ async function existsBitgetUID(uid)                { return !!(await prisma.inta
 async function existsEmail(emailNorm)              { return !!(await prisma.intake.findFirst({ where: { emailNorm } })); }
 async function existsPhone(country, number)        { return !!(await prisma.intake.findFirst({ where: { phoneCountryCode: country, phoneNumber: number } })); }
 
-/* ================== PERSISTENZA ================== */
+/* ===========================
+   PERSISTENZA
+=========================== */
 async function saveIntake(data) {
   return prisma.intake.create({
     data: {
@@ -157,89 +240,68 @@ async function saveIntake(data) {
     }
   });
 }
-function fmtDateTime(dt) { return new Date(dt).toLocaleString('it-IT', { hour12: false }); }
+
 function buildFinalSummary(record, data) {
   const when = fmtDateTime(record.createdAt);
   const ends = new Date(record.createdAt); ends.setDate(ends.getDate() + planDurationDays(data.plan));
   const expiry = fmtDateTime(ends);
+
+  const tg  = escHTML(data.telegramNick);
+  const dc  = escHTML(data.discordNick);
+  const uid = escHTML(data.bitgetUID);
+  const em  = escHTML(data.email);
+  const ph  = `${escHTML(data.phoneCountryCode)} ${escHTML(data.phoneNumber)}`;
+
   return [
-    '✅ *Riepilogo dati*',
-    `• 📨 Nick Telegram: *${data.telegramNick}*`,
-    `• 🕹️ Nick Discord: *${data.discordNick}*`,
-    `• 🆔 UID Bitget: *${data.bitgetUID}*`,
-    `• ✉️ Email: *${data.email}*`,
-    `• 📱 Telefono: *${data.phoneCountryCode} ${data.phoneNumber}*`,
-    `• 🏷️ Abbonamento Discord: *${planHuman(data.plan)}*`,
-    `• 💳 Metodo di pagamento: *${paymentHuman(data.payment)}*`,
-    `• 🕒 Registrazione: *${when}*`,
-    `• ⏰ Scadenza stimata: *${expiry}*`,
+    '✅ <b>Riepilogo dati</b>',
+    `• 📨 Nick Telegram: <b>${tg}</b>`,
+    `• 🕹️ Nick Discord: <b>${dc}</b>`,
+    `• 🆔 UID Bitget: <b>${uid}</b>`,
+    `• ✉️ Email: <b>${em}</b>`,
+    `• 📱 Telefono: <b>${ph}</b>`,
+    `• 🏷️ Abbonamento Discord: <b>${planHuman(data.plan)}</b>`,
+    `• 💳 Metodo di pagamento: <b>${paymentHuman(data.payment)}</b>`,
+    `• 🕒 Registrazione: <b>${when}</b>`,
+    `• ⏰ Scadenza stimata: <b>${expiry}</b>`,
     '',
-    '➡️ *Invia questo messaggio direttamente a **Jonny** in chat privata.*'
+    '➡️ <b>Invia questo messaggio direttamente a Jonny in chat privata.</b>'
   ].join('\n');
 }
 
-/* ================== FLOW HELPERS ================== */
-const STEPS_TEXT = {
-  TG_NICK: '👋 *Benvenuto!*\n\n*1/7* — Inviami il tuo **nick Telegram** (con o senza @).',
-  DC_NICK: '🎮 *2/7* — Inviami il tuo **nick Discord** (come appare su Discord).',
-  BITGET:  '🏦 *3/7* — Inviami il tuo **UID Bitget** (solo cifre).',
-  EMAIL:   '✉️ *4/7* — Inviami la tua **email**.',
-  PHONE:   '📞 *5/7* — Inviami il tuo **numero di telefono con prefisso internazionale**.\nEsempi: `+39 3331234567`, `+41 765432109`'
-};
-
-function getOrCreateSession(chatId) {
-  if (!sessions.has(chatId)) sessions.set(chatId, { step: STEPS.START, data: {} });
-  return sessions.get(chatId);
-}
-
-async function askStep(chatId, step) {
-  const s = getOrCreateSession(chatId);
-  s.step = step;
-
-  // Per ogni step (tranne il primo) mostriamo il bottone INDIETRO; per Discord/Bitget anche i bottoni di aiuto
-  if (step === STEPS.TG_NICK) {
-    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown' });
-  } else if (step === STEPS.DC_NICK) {
-    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_DC.reply_markup });
-  } else if (step === STEPS.BITGET) {
-    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_BG.reply_markup });
-  } else if (step === STEPS.EMAIL) {
-    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_BACK.reply_markup });
-  } else if (step === STEPS.PHONE) {
-    await bot.sendMessage(chatId, STEPS_TEXT[step], { parse_mode: 'Markdown', reply_markup: KB_BACK.reply_markup });
-  } else {
-    await bot.sendMessage(chatId, STEPS_TEXT[step] || 'Procedi.', { parse_mode: 'Markdown', reply_markup: KB_BACK.reply_markup });
-  }
-}
-
-/* ================== COMANDI ================== */
+/* ===========================
+   COMANDI
+=========================== */
 bot.onText(/^\/start$/i, async (msg) => {
-  const chatId = msg.chat.id;
+  const chatId = getChatId(msg);
   const s = getOrCreateSession(chatId);
   s.data = { telegramUserId: String(msg.from?.id || '') };
 
   if (await existsTelegramUserId(s.data.telegramUserId)) {
-    await bot.sendMessage(chatId,
-      '⚠️ *Attenzione*: risulta già una registrazione associata al tuo account Telegram.\nSe pensi sia un errore, contatta **Jonny** in privato.',
-      { parse_mode: 'Markdown' }
-    );
+    await replyTo(msg, '⚠️ <b>Attenzione</b>: risulta già una registrazione associata al tuo account Telegram.<br>Se pensi sia un errore, contatta <b>Jonny</b> in privato.');
     return;
   }
   await askStep(chatId, STEPS.TG_NICK);
 });
 
 bot.onText(/^\/restart$/i, async (msg) => {
-  const chatId = msg.chat.id;
+  const chatId = getChatId(msg);
   sessions.delete(chatId);
-  await bot.sendMessage(chatId, '🔁 *Flusso azzerato.*\nRipartiamo da capo!', { parse_mode: 'Markdown' });
+  await replyTo(msg, '🔁 <b>Flusso azzerato.</b><br>Ripartiamo da capo!');
   await askStep(chatId, STEPS.TG_NICK);
 });
 
-/* ================== MESSAGGI LIBERI ================== */
+// utile per sapere il tuo chat_id
+bot.onText(/^\/whoami$/i, async (msg) => {
+  await replyTo(msg, `👤 <b>whoami</b>\nusername: <code>@${escHTML(msg.from.username || '—')}</code>\nchat_id: <code>${escHTML(msg.chat.id)}</code>`);
+});
+
+/* ===========================
+   MESSAGGI (INPUT UTENTE)
+=========================== */
 bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
   if (msg.data || msg.text?.startsWith('/')) return;
 
+  const chatId = getChatId(msg);
   const text = (msg.text || '').trim();
   if (!text) return;
 
@@ -249,18 +311,12 @@ bot.on('message', async (msg) => {
     switch (s.step) {
       case STEPS.TG_NICK: {
         if (!isValidTelegramNick(text)) {
-          await bot.sendMessage(chatId,
-            '❌ *Nick Telegram non valido.*\nDeve essere 5–32 caratteri alfanumerici/underscore, con o senza @.\nEsempi: `@crypto_user`, `crypto_user`',
-            { parse_mode: 'Markdown' }
-          );
+          await replyTo(msg, '❌ <b>Nick Telegram non valido.</b><br>Deve essere 5–32 caratteri alfanumerici/underscore, con o senza @.<br>Esempi: <code>@crypto_user</code>, <code>crypto_user</code>');
           return;
         }
         const nickNorm = normTelegramNick(text);
         if (await existsTelegramNick(nickNorm)) {
-          await bot.sendMessage(chatId,
-            '⚠️ Questo *nick Telegram* risulta già registrato. Inserisci un nick diverso oppure contatta **Jonny**.',
-            { parse_mode: 'Markdown' }
-          );
+          await replyTo(msg, '⚠️ Questo <b>nick Telegram</b> risulta già registrato. Inserisci un nick diverso oppure contatta <b>Jonny</b>.');
           return;
         }
         s.data.telegramNick = text;
@@ -270,18 +326,12 @@ bot.on('message', async (msg) => {
 
       case STEPS.DC_NICK: {
         if (!isValidDiscordNick(text)) {
-          await bot.sendMessage(chatId,
-            '❌ *Nick Discord non valido.* Usa 2–32 caratteri (lettere, numeri, punto, trattino, underscore).',
-            { parse_mode: 'Markdown' }
-          );
+          await replyTo(msg, '❌ <b>Nick Discord non valido.</b> Usa 2–32 caratteri (lettere, numeri, punto, trattino, underscore).');
           return;
         }
         const nickNorm = normDiscordNick(text);
         if (await existsDiscordNick(nickNorm)) {
-          await bot.sendMessage(chatId,
-            '⚠️ Questo *nick Discord* risulta già registrato. Inserisci un nick diverso oppure contatta **Jonny**.',
-            { parse_mode: 'Markdown' }
-          );
+          await replyTo(msg, '⚠️ Questo <b>nick Discord</b> risulta già registrato. Inserisci un nick diverso oppure contatta <b>Jonny</b>.');
           return;
         }
         s.data.discordNick = text;
@@ -291,14 +341,11 @@ bot.on('message', async (msg) => {
 
       case STEPS.BITGET: {
         if (!isValidBitgetUID(text)) {
-          await bot.sendMessage(chatId, '❌ *UID Bitget non valido.* Inserisci solo cifre (5–20).', { parse_mode: 'Markdown' });
+          await replyTo(msg, '❌ <b>UID Bitget non valido.</b> Inserisci solo cifre (5–20).');
           return;
         }
         if (await existsBitgetUID(text)) {
-          await bot.sendMessage(chatId,
-            '⚠️ Questo *UID Bitget* risulta già registrato. Verifica e reinserisci, oppure contatta **Jonny**.',
-            { parse_mode: 'Markdown' }
-          );
+          await replyTo(msg, '⚠️ Questo <b>UID Bitget</b> risulta già registrato. Verifica e reinserisci, oppure contatta <b>Jonny</b>.');
           return;
         }
         s.data.bitgetUID = text;
@@ -308,15 +355,12 @@ bot.on('message', async (msg) => {
 
       case STEPS.EMAIL: {
         if (!isValidEmailFmt(text)) {
-          await bot.sendMessage(chatId, '❌ *Email non valida.* Esempio: `nome@dominio.it`', { parse_mode: 'Markdown' });
+          await replyTo(msg, '❌ <b>Email non valida.</b> Esempio: <code>nome@dominio.it</code>');
           return;
         }
         const emailNorm = normEmail(text);
         if (await existsEmail(emailNorm)) {
-          await bot.sendMessage(chatId,
-            '⚠️ *Email* già registrata. Usa un’altra email o contatta **Jonny**.',
-            { parse_mode: 'Markdown' }
-          );
+          await replyTo(msg, '⚠️ <b>Email</b> già registrata. Usa un’altra email o contatta <b>Jonny</b>.');
           return;
         }
         s.data.email = text;
@@ -327,17 +371,11 @@ bot.on('message', async (msg) => {
       case STEPS.PHONE: {
         const parsed = parsePhoneWithPrefix(text);
         if (!parsed) {
-          await bot.sendMessage(chatId,
-            '❌ *Numero non valido.* Usa il formato **internazionale** con prefisso “+”.\nEsempi: `+39 3331234567`, `+41 765432109`',
-            { parse_mode: 'Markdown' }
-          );
+          await replyTo(msg, '❌ <b>Numero non valido.</b> Usa il formato <b>internazionale</b> con “+”.<br>Esempi: <code>+39 3331234567</code>, <code>+41 765432109</code>');
           return;
         }
         if (await existsPhone(parsed.country, parsed.number)) {
-          await bot.sendMessage(chatId,
-            '⚠️ *Numero di telefono* già registrato. Inserisci un altro numero o contatta **Jonny**.',
-            { parse_mode: 'Markdown' }
-          );
+          await replyTo(msg, '⚠️ <b>Numero di telefono</b> già registrato. Inserisci un altro numero o contatta <b>Jonny</b>.');
           return;
         }
         s.data.phoneCountryCode = parsed.country;
@@ -346,24 +384,28 @@ bot.on('message', async (msg) => {
         break;
       }
 
-      default: break;
+      default:
+        // fuori flusso: ignora
+        break;
     }
   } catch (err) {
     console.error('flow_error', err);
-    await bot.sendMessage(chatId, '⚠️ *Errore temporaneo.* Riprova tra poco.', { parse_mode: 'Markdown' });
+    await replyTo(msg, '⚠️ <b>Errore temporaneo.</b> Riprova tra poco.');
   }
 });
 
-/* ================== BOTTONI (CALLBACK) ================== */
+/* ===========================
+   CALLBACK (BOTTONI)
+=========================== */
 async function askPlan(chatId) {
   const s = getOrCreateSession(chatId);
   s.step = STEPS.PLAN;
-  await bot.sendMessage(chatId, '🧾 *6/7* — Che tipo di **abbonamento Discord** hai acquistato?', KB_PLAN);
+  await bot.sendMessage(chatId, '🧾 <b>6/7</b> — Che tipo di <b>abbonamento Discord</b> hai acquistato?', { parse_mode: 'HTML', reply_markup: KB_PLAN.reply_markup });
 }
 async function askPayment(chatId) {
   const s = getOrCreateSession(chatId);
   s.step = STEPS.PAYMENT;
-  await bot.sendMessage(chatId, '💳 *7/7* — Che tipo di **pagamento** hai utilizzato?', KB_PAYMENT);
+  await bot.sendMessage(chatId, '💳 <b>7/7</b> — Che tipo di <b>pagamento</b> hai utilizzato?', { parse_mode: 'HTML', reply_markup: KB_PAYMENT.reply_markup });
 }
 
 async function finishFlow(chatId) {
@@ -371,20 +413,20 @@ async function finishFlow(chatId) {
   s.step = STEPS.END;
   try {
     const saved = await saveIntake(s.data);
-    await bot.sendMessage(chatId, buildFinalSummary(saved, s.data), { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, buildFinalSummary(saved, s.data), { parse_mode: 'HTML' });
     sessions.delete(chatId);
   } catch (e) {
     console.error('saveIntake_error', e);
-    let msg = '⚠️ *Errore nel salvataggio.*';
+    let msg = '⚠️ <b>Errore nel salvataggio.</b>';
     if (String(e.message || '').toLowerCase().includes('unique')) {
-      msg += ' Alcuni dati risultano già registrati. Verifica i campi oppure contatta **Jonny**.';
+      msg += ' Alcuni dati risultano già registrati. Verifica i campi oppure contatta <b>Jonny</b>.';
     }
-    await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
   }
 }
 
 bot.on('callback_query', async (query) => {
-  const chatId = query.message.chat.id;
+  const chatId = getChatId(query);
   const data = String(query.data || '');
   const s = getOrCreateSession(chatId);
 
@@ -405,7 +447,7 @@ bot.on('callback_query', async (query) => {
     if (data === 'NO_DISCORD' && s.step === STEPS.DC_NICK) {
       await bot.answerCallbackQuery(query.id);
       await bot.sendMessage(chatId, '⬇️ Scarica Discord da qui:\nhttps://discord.com/download');
-      await bot.sendMessage(chatId, '✅ *Scarica Discord, registrati ed inserisci il tuo nickname Discord.*', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '✅ <b>Scarica Discord, registrati ed inserisci il tuo nickname Discord.</b>', { parse_mode: 'HTML' });
       await askStep(chatId, STEPS.DC_NICK);
       return;
     }
@@ -414,7 +456,7 @@ bot.on('callback_query', async (query) => {
     if (data === 'NO_BITGET' && s.step === STEPS.BITGET) {
       await bot.answerCallbackQuery(query.id);
       await bot.sendMessage(chatId, '⬇️ Scarica Bitget da qui:\nhttps://bonus.bitget.com/KZZRD3');
-      await bot.sendMessage(chatId, '✅ *Scarica Bitget, registrati, ed inserisci il tuo UID.*', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '✅ <b>Scarica Bitget, registrati, ed inserisci il tuo UID.</b>', { parse_mode: 'HTML' });
       await askStep(chatId, STEPS.BITGET);
       return;
     }
@@ -432,7 +474,7 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
-    // PAYMENT
+    // PAYMENT (incluse reti USDT)
     if (data.startsWith('PAY:') && s.step === STEPS.PAYMENT) {
       const pay = data.split(':')[1];
       if (!['BANK_TRANSFER', 'PAYPAL', 'USDT_BEP20', 'USDT_ERC20', 'USDT_TRC20'].includes(pay)) {
@@ -452,7 +494,9 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-/* ================== HEALTH / ERROR ================== */
+/* ===========================
+   HEALTHCHECK / ERROR HANDLERS
+=========================== */
 const app = express();
 app.get('/', (_req, res) => res.send('OK'));
 const PORT = process.env.PORT || 3000;
@@ -462,6 +506,7 @@ bot.on('polling_error', (err) => {
   if (['ETELEGRAM', 'EFATAL'].includes(err?.code)) return;
   console.error('polling_error', err);
 });
+
 
 
 
